@@ -2612,6 +2612,12 @@ Error GLBExporterInstance::_export_instanced_scene(Node *root, const String &p_d
 						}
 					}
 				}
+				if (path.is_empty()) {
+					String index_based_name = source_path.get_file().get_basename() + "_" + itos(i);
+					if (image_name_to_path.has(index_based_name)) {
+						path = image_name_to_path[index_based_name];
+					}
+				}
 				if (path.is_empty() && !name.is_empty()) {
 					auto parts = name.rsplit("_", false, 1);
 					String material_name = parts.size() > 0 ? parts[0] : String();
