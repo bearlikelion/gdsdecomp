@@ -2597,11 +2597,20 @@ Error GLBExporterInstance::_export_instanced_scene(Node *root, const String &p_d
 				image_name_to_path[E.get_file().get_basename()] = E;
 			}
 
+			print_line("DEBUG: image_name_to_path contents:");
+			for (auto &E : image_name_to_path) {
+				print_line("  key='" + E.key + "' val='" + E.value + "'");
+			}
+			if (iinfo.is_valid()) {
+				print_line("DEBUG: iinfo source_file='" + iinfo->get_source_file() + "'");
+			}
+			print_line("DEBUG: source_path='" + source_path + "'");
 			for (int i = 0; i < json_images.size(); i++) {
 				Dictionary image_dict = json_images[i];
 				Ref<Texture2D> image = images[i];
 				auto path = get_path_res(image);
 				String name = image->get_name();
+				print_line("DEBUG: image[" + itos(i) + "] name='" + name + "' path='" + path + "'");
 				if (path.is_empty() && !name.is_empty()) {
 					if (image_name_to_path.has(name)) {
 						path = image_name_to_path[name];
@@ -2612,8 +2621,8 @@ Error GLBExporterInstance::_export_instanced_scene(Node *root, const String &p_d
 						}
 					}
 				}
-				if (path.is_empty()) {
-					String index_based_name = source_path.get_file().get_basename() + "_" + itos(i);
+				if (path.is_empty() && iinfo.is_valid()) {
+					String index_based_name = iinfo->get_source_file().get_file().get_basename() + "_" + itos(i);
 					if (image_name_to_path.has(index_based_name)) {
 						path = image_name_to_path[index_based_name];
 					}
