@@ -2602,12 +2602,26 @@ Error GLBExporterInstance::_export_instanced_scene(Node *root, const String &p_d
 				Ref<Texture2D> image = images[i];
 				auto path = get_path_res(image);
 				String name = image->get_name();
-				// If the path points to an imported resource (.godot/imported/), resolve it
-				// to the original source path via index-based lookup.
-				if (!path.is_empty() && path.contains(".godot/imported/") && iinfo.is_valid()) {
-					String index_based_name = iinfo->get_source_file().get_file().get_basename() + "_" + itos(i);
-					if (image_name_to_path.has(index_based_name)) {
-						path = image_name_to_path[index_based_name];
+				// If the path is not a known dependency (e.g. points to .godot/imported/
+				// or has an incorrect directory prefix), resolve it via index or name lookup.
+				if (!path.is_empty() && !image_deps_needed.has(path)) {
+					String resolved;
+					// Try index-based lookup using import info source file.
+					if (iinfo.is_valid()) {
+						String index_based_name = iinfo->get_source_file().get_file().get_basename() + "_" + itos(i);
+						if (image_name_to_path.has(index_based_name)) {
+							resolved = image_name_to_path[index_based_name];
+						}
+					}
+					// Try basename lookup from the path itself.
+					if (resolved.is_empty()) {
+						String basename = path.get_file().get_basename();
+						if (image_name_to_path.has(basename)) {
+							resolved = image_name_to_path[basename];
+						}
+					}
+					if (!resolved.is_empty()) {
+						path = resolved;
 					}
 				}
 				if (path.is_empty() && !name.is_empty()) {
