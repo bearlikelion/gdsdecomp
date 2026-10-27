@@ -12,6 +12,12 @@ protected:
 	static Error _save_image(const String &p_path, const Ref<Image> &p_image, bool p_lossy, float p_quality = 1.0);
 
 public:
+	static constexpr bool ver_supports_lossless_webp(int ver_major, int ver_minor) {
+		return ver_major > 3 || (ver_major == 3 && ver_minor >= 4);
+	}
+	static constexpr bool ver_supports_lossless_webp(const Pair<int, int> &p_version) {
+		return ver_supports_lossless_webp(p_version.first, p_version.second);
+	}
 	static Error decompress_image(const Ref<Image> &p_image);
 	static Error save_image(const String &p_path, const Ref<Image> &p_image, bool p_lossy, float p_quality = 1.0, bool p_duplicate = true);
 	static Error save_image_as_tga(const String &p_path, const Ref<Image> &p_image, bool p_duplicate = true);
@@ -23,6 +29,8 @@ public:
 	static Error save_image_as_hdr(const String &p_path, const Ref<Image> &p_image, bool p_duplicate = true);
 	static Vector<String> get_supported_extensions();
 	static bool is_supported_extension(const String &p_ext);
+	static int64_t get_image_data_size(int p_width, int p_height, Image::Format p_format, bool p_mipmaps);
+	static Image::CompressMode get_compress_mode_from_format(Image::Format format);
 
 protected:
 	static void _bind_methods();

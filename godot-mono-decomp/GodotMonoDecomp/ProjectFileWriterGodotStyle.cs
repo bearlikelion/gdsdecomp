@@ -17,12 +17,14 @@
 // DEALINGS IN THE SOFTWARE.
 
 using System.Reflection.PortableExecutable;
+using System.Runtime.Loader;
 using System.Xml;
 using GodotMonoDecomp;
 using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.ProjectDecompiler;
 using ICSharpCode.Decompiler.Metadata;
 using ICSharpCode.Decompiler.Util;
+using NuGet.Configuration;
 
 
 public interface IGodotProjectWithSettingsProvider : IProjectInfoProvider
@@ -176,13 +178,14 @@ namespace GodotMonoDecomp
 				}
 
 			}
-			if (settings.WriteNuGetPackageReferences && depInfo != null){
+			HashSet<DotNetCoreDepInfo> includedDeps = [];
+			if (depInfo != null){
 				PlaceIntoTag("ItemGroup", xml,
-					() => WritePackageReferences(xml, module, project, projectType, depInfo, settings));
+					() => includedDeps = WritePackageReferences(xml, module, project, projectType, depInfo, settings));
 			}
 
 			PlaceIntoTag("ItemGroup", xml,
-				() => WriteReferences(xml, module, project, projectType, depInfo, settings));
+				() => WriteReferences(xml, module, project, projectType, depInfo, settings, includedDeps));
 
 			xml.WriteEndElement();
 		}
@@ -194,13 +197,20 @@ namespace GodotMonoDecomp
 			       ImplicitGodotReferences.Contains(name);
 		}
 
-		static void WritePackageReferences(XmlTextWriter xml, MetadataFile module, IProjectInfoProvider project,
+		static HashSet<DotNetCoreDepInfo> WritePackageReferences(XmlTextWriter xml, MetadataFile module, IProjectInfoProvider project,
 			ProjectType projectType, DotNetCoreDepInfo? deps, GodotMonoDecompSettings settings)
 		{
 			List<DotNetCoreDepInfo> excludedDepsToComment = new List<DotNetCoreDepInfo>();
 			List<DotNetCoreDepInfo> nonNuGetOrgDepsToComment = new List<DotNetCoreDepInfo>();
-			List<DotNetCoreDepInfo> includedDeps = new List<DotNetCoreDepInfo>();
+			HashSet<DotNetCoreDepInfo> includedDeps = [];
 			HashSet<DotNetCoreDepInfo> includeWarningComment = [];
+
+			if (deps == null || deps.deps.Length == 0)
+			{
+				return [];
+			}
+
+			HashSet<DotNetCoreDepInfo> depsToAdd = [];
 
 			foreach (var dep in deps?.deps ?? [])
 			{
@@ -212,16 +222,22 @@ namespace GodotMonoDecomp
 				// We do not want to include source generator packages in the project file because they will attempt
 				// to generate code which we already have decompiled and create build errors.
 				// Check if it's a possible source generator package; it will have no runtime components
-				if (dep.runtimeComponents == null || dep.runtimeComponents.Length == 0)
+				if (dep.HasNoRuntimeComponent)
 				{
 					// double check to see if the module has a reference to this
-					if (module.AssemblyReferences.Any(r => r.Name == dep.Name))
+					if (module.AssemblyReferences.Any(r => dep.Matches(r)))
 					{
 						includeWarningComment.Add(dep);
 						includedDeps.Add(dep);
 						continue;
 					}
 					excludedDepsToComment.Add(dep);
+					if (dep.HashMatchesNugetOrgStatus == DotNetCoreDepInfo.HashMatchesNugetOrg.NoMatch)
+					{
+						continue;
+					}
+					// check if it has any dependencies that do have runtime components that the module has a reference to
+					depsToAdd.AddRange(dep.deps.Where(d => !IsImplicitReference(d.Name) && !d.HasNoRuntimeComponent && d.IsAvailableOnNuget && module.AssemblyReferences.Any(r => d.Matches(r))));
 					continue;
 				}
 
@@ -232,6 +248,7 @@ namespace GodotMonoDecomp
 				}
 				includedDeps.Add(dep);
 			}
+			includedDeps.AddRange(depsToAdd.Where(d => !includedDeps.Any(d2 => d2.HasDep(d.AssemblyRef, "package", settings.CreateAdditionalProjectsForProjectReferences))));
 
 			void WritePackageRef(XmlTextWriter xml, DotNetCoreDepInfo dep)
 			{
@@ -254,10 +271,6 @@ namespace GodotMonoDecomp
 				}
 			}
 
-			if (deps == null || deps.deps.Length == 0)
-			{
-				return;
-			}
 
 			if (settings.WriteNuGetPackageReferences)
 			{
@@ -277,6 +290,11 @@ namespace GodotMonoDecomp
 			{
 				writeSeriesOfLineComments(xml, (newXml) => WritePackageRefs(newXml, nonNuGetOrgDepsToComment),
 					"The following packages are not from nuget.org and may not be available. Including these may cause build errors.");
+			}
+			if (settings.WriteNuGetPackageReferences){
+				return includedDeps;
+			} else {
+				return [];
 			}
 		}
 
@@ -593,7 +611,7 @@ namespace GodotMonoDecomp
 		}
 
 		static void WriteReferences(XmlTextWriter xml, MetadataFile module, IGodotProjectWithSettingsProvider project,
-			ProjectType projectType, DotNetCoreDepInfo? deps, GodotMonoDecompSettings settings)
+			ProjectType projectType, DotNetCoreDepInfo? deps, GodotMonoDecompSettings settings, HashSet<DotNetCoreDepInfo> writtenPackageDeps)
 		{
 			string copyToDir = Path.Combine(project.TargetDirectory, "_mono_referenced_assemblies");
 			// hashset of copied assemblies
@@ -615,20 +633,28 @@ namespace GodotMonoDecomp
 				}
 			}
 
-			List<AssemblyReference> godotSharpRefs = new List<AssemblyReference>();
+			HashSet<IAssemblyReference> godotSharpRefs = new HashSet<IAssemblyReference>();
 
-			List<AssemblyReference> packageReferences = new List<AssemblyReference>();
+			HashSet<IAssemblyReference> packageReferences = new HashSet<IAssemblyReference>();
 
-			List<AssemblyReference> projectReferences = new List<AssemblyReference>();
+			HashSet<IAssemblyReference> projectReferences = new HashSet<IAssemblyReference>();
 
 			HashSet<string> seenRefs = new HashSet<string>();
+			bool NotProjectRef(DotNetCoreDepInfo dep) => !settings.CreateAdditionalProjectsForProjectReferences || !dep.IsProject;
+
+			List<IAssemblyReference> RefsToWrite = module.AssemblyReferences.Where(r => !ImplicitReferences.Contains(r.Name)).Select(IAssemblyReference (r) => r).ToList();
+
+			var allDeps = deps?.GetAllDeps(!settings.CreateAdditionalProjectsForProjectReferences) ?? [];
+			var runtimepackComponents = allDeps.Where(d => d.IsRuntimePack).SelectMany(d => d.runtimeComponents).ToHashSet() ?? [];
+			var nonruntimepackComponents = allDeps.Where(d => !d.IsRuntimePack && NotProjectRef(d)).SelectMany(d => d.runtimeComponents).ToHashSet() ?? [];
+			runtimepackComponents = [.. runtimepackComponents.Where(c => !nonruntimepackComponents.Contains(c))];
 
 
-			foreach (var reference in module.AssemblyReferences.Where(r => !ImplicitReferences.Contains(r.Name)))
+			foreach (var reference in RefsToWrite)
 			{
-				if (isNetCoreApp &&
+				if (isNetCoreApp && (runtimepackComponents.Any(c => c.Matches(reference)) || (
 				    project.AssemblyReferenceClassifier.IsSharedAssembly(reference, out string? runtimePack) &&
-				    targetPacks.Contains(runtimePack))
+				    targetPacks.Contains(runtimePack))))
 				{
 					continue;
 				}
@@ -651,6 +677,11 @@ namespace GodotMonoDecomp
 				{
 					projectReferences.Add(reference);
 					continue;
+				}
+
+				var referenceDep = deps?.GetDep(reference);
+				if (referenceDep?.HasNoRuntimeComponent ?? false) {
+					xml.WriteComment($"Reference '{reference.Name}' has no runtime components, but the assembly makes a reference to it. This may be a source generator package.");
 				}
 
 				WriteRef(xml, reference, true);
@@ -693,15 +724,48 @@ namespace GodotMonoDecomp
 					},
 					"The following references were not added to the project file because they are part of the project references above.");
 			}
-
-			bool IsProjectReference(AssemblyReference reference)
-			{
-				return settings.CreateAdditionalProjectsForProjectReferences && deps != null && deps.HasDep(reference.Name, "project", false);
+			HashSet<IAssemblyReference> AdditionalRefs = GetAdditionalRefsToWrite(deps);
+			if (AdditionalRefs.Count > 0) {
+				writeBlockComment(xml, (newXml) => {
+						foreach (var reference in AdditionalRefs)
+						{
+							// realRef is true because we want to copy the file to the output directory if necessary, but not include it in the assembly references
+							WriteRef(newXml, reference, true);
+						}
+					},
+					"The following references were found in the dependency manifest but the assembly makes no reference to them.");
 			}
 
-			bool DepExistsInPackages(AssemblyReference reference)
+
+			bool IsProjectReference(IAssemblyReference reference)
 			{
-				return settings.WriteNuGetPackageReferences && deps != null && deps.HasDep(reference.Name, "package", true);
+				return settings.CreateAdditionalProjectsForProjectReferences && deps != null && deps.HasDep(reference, "project", false);
+			}
+
+			bool DepExistsInPackages(IAssemblyReference reference)
+			{
+				return writtenPackageDeps.Any(d2 => d2.Matches(reference));
+			}
+
+			HashSet<IAssemblyReference> GetAdditionalRefsToWrite(DotNetCoreDepInfo? deps){
+				if (deps == null){
+					return [];
+				}
+				var depsToWrite = deps?.deps.Where(d => module.AssemblyReferences.Any(r => d.Matches(r))).ToHashSet() ?? [];
+				bool ShouldNotFilter(DotNetCoreDepInfo d){
+					return !(
+							DepExistsInPackages(d.AssemblyRef) ||
+							IsProjectReference(d.AssemblyRef) ||
+							IsImplicitReference(d.Name) ||
+							d.HasNoRuntimeComponent ||
+							depsToWrite.Contains(d) ||
+							depsToWrite.Any(d2 => d2.HasDep(d.AssemblyRef, null)));
+				}
+				return deps?.deps
+					.Where(ShouldNotFilter)
+					.Select(d => d.AssemblyRef as IAssemblyReference)
+					.Where(ar => project.AssemblyResolver.Resolve(ar) != null)
+					.ToHashSet() ?? [];
 			}
 
 			string GetNewRefOutputPath(string path)
@@ -787,7 +851,7 @@ namespace GodotMonoDecomp
 				}
 			}
 
-			void WriteRef(XmlTextWriter newXml, AssemblyReference reference, bool realRef, string? nameOverride = null)
+			void WriteRef(XmlTextWriter newXml, IAssemblyReference reference, bool realRef, string? nameOverride = null)
 			{
 				newXml.WriteStartElement("Reference");
 				newXml.WriteAttributeString("Include", nameOverride ?? reference.Name);

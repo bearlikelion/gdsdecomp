@@ -13,7 +13,6 @@ var RESOURCE_PREVIEW: Control = null
 var HSPLIT_CONTAINER: HSplitContainer = null
 var SHOW_PREVIEW_BUTTON: Button = null
 
-var isHiDPI = false #DisplayServer.screen_get_dpi() >= 240
 var root: TreeItem = null
 var userroot: TreeItem = null
 var num_files:int = 0
@@ -83,6 +82,7 @@ func _get_all_files(files: PackedStringArray) -> PackedStringArray:
 
 const DIR_STRUCTURE_OPTION_NAME = "Directory Structure"
 const EXPORT_SCENE_OPTION_NAME = "Export Scenes as"
+const EXPORT_MESH_OPTION_NAME = "Export Meshes as"
 
 enum DirStructure {
 	FLAT,
@@ -97,6 +97,14 @@ enum ExportSceneType {
 	GLTF
 }
 
+enum ExportMeshType {
+	AUTO,
+	TRES,
+	OBJ,
+	GLB,
+	GLTF
+}
+
 const DIR_STRUCTURE_NAMES: PackedStringArray = [
 	"Flat",
 	"Relative Hierarchical",
@@ -106,6 +114,14 @@ const DIR_STRUCTURE_NAMES: PackedStringArray = [
 const EXPORT_SCENE_TYPE_NAMES: PackedStringArray = [
 	"Auto",
 	"tscn",
+	"GLB",
+	"GLTF",
+]
+
+const EXPORT_MESH_TYPE_NAMES: PackedStringArray = [
+	"Auto",
+	"tres",
+	"OBJ",
 	"GLB",
 	"GLTF",
 ]
@@ -151,6 +167,44 @@ func _export_scene(file: String, output_dir: String, dir_structure: DirStructure
 		report.error = OK
 	return report
 
+# TODO: A more generic way to export resources, stop copying all this code around
+func _export_mesh(file: String, output_dir: String, dir_structure: DirStructure, rel_base: String, export_type: ExportMeshType) -> ExportReport:
+	var source_file = file
+	var iinfo = GDRESettings.get_import_info_by_dest(file)
+	if iinfo:
+		source_file = iinfo.source_file
+
+	var ext = source_file.get_extension().to_lower()
+
+	if export_type == ExportMeshType.GLB:
+		ext = "glb"
+	elif export_type == ExportMeshType.GLTF:
+		ext = "gltf"
+	elif export_type == ExportMeshType.OBJ:
+		ext = "obj"
+	elif export_type == ExportMeshType.TRES:
+		ext = "tres"
+	else: # AUTO
+		if not is_instance_valid(iinfo):
+			ext = "tres"
+
+	var report: ExportReport = ExportReport.new()
+	var export_dest = get_output_file_name(source_file, output_dir, dir_structure, ext, rel_base)
+	if ext == "tres":
+		# just use bin to text
+		report.error = ResourceCompatLoader.to_text(file, export_dest)
+		return report
+
+	if ext == "obj":
+		report.error = ObjExporter.export_file_with_options(export_dest, file, {})
+	else:
+		report = SceneExporter.export_file_with_options(export_dest, file, {
+			"Exporter/Scene/GLTF/replace_shader_materials": true,
+		})
+		if (report.error == ERR_BUG or report.error == ERR_PRINTER_ON_FIRE or report.error == ERR_DATABASE_CANT_READ):
+			report.error = OK
+	return report
+
 
 func get_log_error_string(errs: PackedStringArray) -> String:
 	return "\n".join(GDRECommon.filter_error_backtraces(errs))
@@ -168,7 +222,7 @@ func convert_pcfg_to_text(path: String, output_dir: String) -> Array:
 		return [err, text_file]
 	return [loader.save_cfb(output_dir, ver_major, ver_minor), text_file]
 
-func _export_files(files: PackedStringArray, output_dir: String, dir_structure: DirStructure, rel_base: String, export_glb: ExportSceneType) -> PackedStringArray:
+func _export_files(files: PackedStringArray, output_dir: String, dir_structure: DirStructure, rel_base: String, export_glb: ExportSceneType, export_mesh: ExportMeshType) -> PackedStringArray:
 	var errs: PackedStringArray = []
 	files = _get_all_files(files)
 
@@ -201,6 +255,12 @@ func _export_files(files: PackedStringArray, output_dir: String, dir_structure: 
 				if (report.error == ERR_SKIP):
 					errs.append("Exporting cancelled: " + file + "\n" + report.message + "\n" + get_log_error_string(report.get_error_messages()))
 					break
+				errs.append("Failed to export resource: " + file + "\n" + report.message + "\n" + get_log_error_string(report.get_error_messages()))
+		if file_ext == "mesh" or (_ret and _ret.get_compat_type().contains("Mesh")) and export_mesh != ExportMeshType.AUTO:
+			var report: ExportReport = _export_mesh(file, output_dir, dir_structure, rel_base, export_mesh)
+			if not report:
+				errs.append("Failed to export resource: " + file + get_log_error_string(GDRESettings.get_errors()))
+			elif report.error != OK and report.error != ERR_PRINTER_ON_FIRE:
 				errs.append("Failed to export resource: " + file + "\n" + report.message + "\n" + get_log_error_string(report.get_error_messages()))
 		elif _ret:
 			var iinfo: ImportInfo = ImportInfo.copy(_ret)
@@ -244,7 +304,7 @@ func _on_export_resources_confirmed(output_dir: String):
 	var export_preview_visible = %GdreResourcePreview.is_main_view_visible()
 	if export_preview_visible:
 		%GdreResourcePreview.set_main_view_visible(false)
-	self.call_on_next_process(self.call_on_next_process.bind(self._do_export.bind(output_dir, export_preview_visible)))
+	GDREMainLoop.call_on_next_process(GDREMainLoop.call_on_next_process.bind(self._do_export.bind(output_dir, export_preview_visible)))
 
 
 func _show_error_or_success(errs: PackedStringArray, success_message: String, output_dir: String):
@@ -264,18 +324,19 @@ func _do_export(output_dir: String, export_preview_visible: bool):
 	var options = %ExportResDirDialog.get_selected_options()
 	var dir_structure = options.get(DIR_STRUCTURE_OPTION_NAME, DirStructure.RELATIVE_HIERARCHICAL)
 	var export_glb: ExportSceneType = options.get(EXPORT_SCENE_OPTION_NAME, int(ExportSceneType.AUTO))
+	var export_mesh: ExportMeshType = options.get(EXPORT_MESH_OPTION_NAME, int(ExportMeshType.AUTO))
 
-	errs = _export_files(files, output_dir, dir_structure, rel_base, export_glb)
+	errs = _export_files(files, output_dir, dir_structure, rel_base, export_glb, export_mesh)
 	if export_preview_visible:
 		%GdreResourcePreview.set_main_view_visible(true)
 
-	self.call_on_next_process(self.call_on_next_process.bind(self._show_error_or_success.bind(errs, "Successfully exported resources", output_dir)))
+	GDREMainLoop.call_on_next_process(GDREMainLoop.call_on_next_process.bind(self._show_error_or_success.bind(errs, "Successfully exported resources", output_dir)))
 
 
 
 
 func _on_extract_resources_dir_selected(path: String):
-	self.call_on_next_process(self.call_on_next_process.bind(self._do_extract.bind(path)))
+	GDREMainLoop.call_on_next_process(GDREMainLoop.call_on_next_process.bind(self._do_extract.bind(path)))
 
 func _do_extract(path: String):
 	var options = %ExtractResDirDialog.get_selected_options()
@@ -295,7 +356,7 @@ func _do_extract(path: String):
 		var err = extract_file(file, path, dir_structure, rel_base)
 		if not err.is_empty():
 			errs.append(err)
-	self.call_on_next_process(self.call_on_next_process.bind(self._show_error_or_success.bind(errs, "Successfully extracted resources", path)))
+	GDREMainLoop.call_on_next_process(GDREMainLoop.call_on_next_process.bind(self._show_error_or_success.bind(errs, "Successfully extracted resources", path)))
 
 func _determine_rel_base_dir(selected_items: Array) -> String:
 	var base_dirs: Dictionary = {}
@@ -372,6 +433,12 @@ func _set_file_dialog_options(file_dialog: FileDialog, default_dir_structure: Di
 	if not include_scene:
 		return
 	var include_glb = GDRESettings.get_ver_major() >= SceneExporter.get_minimum_godot_ver_supported()
+	var mesh_default = options.get(EXPORT_MESH_OPTION_NAME, int(ExportMeshType.AUTO))
+	var mesh_opts = EXPORT_MESH_TYPE_NAMES.duplicate()
+	if not include_glb:
+		mesh_opts.remove_at(int(ExportMeshType.GLTF))
+		mesh_opts.remove_at(int(ExportMeshType.GLB))
+	file_dialog.add_option(EXPORT_MESH_OPTION_NAME, mesh_opts, mesh_default)
 	var scene_default = options.get(EXPORT_SCENE_OPTION_NAME, int(ExportSceneType.AUTO))
 	#file_dialog.set_option_default(0, int(default_dir_structure))
 	var glb_opts = EXPORT_SCENE_TYPE_NAMES.duplicate()
@@ -414,12 +481,6 @@ func _ready():
 	RESOURCE_PREVIEW = %GdreResourcePreview
 	HSPLIT_CONTAINER = %HSplitContainer
 	SHOW_PREVIEW_BUTTON = %ShowResourcePreview
-	if isHiDPI:
-		# get_viewport().size *= 2.0
-		# get_viewport().content_scale_factor = 2.0
-		#ThemeDB.fallback_base_scale = 2.0
-		RECOVER_WINDOW.content_scale_factor = 2.0
-		RECOVER_WINDOW.size *= 2.0
 
 	clear()
 	SHOW_PREVIEW_BUTTON.set_pressed_no_signal(true)
@@ -561,7 +622,7 @@ func _on_show_resource_preview_toggled(toggled_on: bool) -> void:
 		RESOURCE_PREVIEW.visible = true
 		# get the current size of the window
 		# set the split offset to 50% of the window size
-		HSPLIT_CONTAINER.set_split_offset(self.size.x / 2)
+		HSPLIT_CONTAINER.set_split_offset((self.size.x / self.content_scale_factor) / 2)
 		SHOW_PREVIEW_BUTTON.text = "Hide Resource Preview"
 		_on_file_tree_item_selected()
 	else:
@@ -588,16 +649,16 @@ func set_assembly_good(good: bool) -> void:
 	else:
 		%AssemblyLabel.text = "C# Assembly ⚠️"
 		if FileAccess.file_exists(%Assembly.text):
-			%AssemblyLabel.tooltip_text = "File is not a valid .NET IL assembly"
+			if GodotMonoDecompWrapper.is_file_assembly(%Assembly.text):
+				%AssemblyLabel.tooltip_text = "File is NativeAOT assembly, not supported by GDRE Tools"
+			else:
+				%AssemblyLabel.tooltip_text = "File is not a valid .NET IL assembly (corrupt?)"
 		else:
 			%AssemblyLabel.tooltip_text = "File does not exist"
 
 
 func _on_assembly_button_pressed() -> void:
-	var assembly_name = GDRESettings.get_project_dotnet_assembly_name()
 	var filter = "*.dll"
-	if !assembly_name.is_empty():
-		filter = assembly_name + ".dll"
 	var assembly_dir = %Assembly.text.get_base_dir()
 	if assembly_dir.is_empty():
 		assembly_dir = GDRESettings.get_pack_path().get_base_dir()
@@ -631,15 +692,16 @@ func _on_assembly_focus_exited() -> void:
 
 func _on_export_settings_button_pressed() -> void:
 	%GDREConfigDialog.clear()
-	%GDREConfigDialog.show()
+	%GDREConfigDialog.popup_centered()
 
 
-func _on_gdre_config_dialog_config_changed(changed_settings: Dictionary[String, Variant]) -> void:
+func _on_gdre_config_dialog_config_changed(changed_settings: Dictionary[String, Array]) -> void:
 	GDRESettings.update_from_ephemeral_settings()
+	RESOURCE_PREVIEW.refresh()
 
 
 func _on_add_pcks_dialog_files_selected(paths: PackedStringArray) -> void:
-	self.call_on_next_process(self.call_on_next_process.bind(self._reload_with.bind(paths)))
+	GDREMainLoop.call_on_next_process(GDREMainLoop.call_on_next_process.bind(self._reload_with.bind(paths)))
 
 func _reload_with(paths: PackedStringArray):
 	var curr_pcks = GDRESettings.get_pack_info_list()
@@ -669,3 +731,6 @@ func _on_add_pcks_button_pressed() -> void:
 
 func _on_extract_success_dialog_confirmed() -> void:
 	pass # Replace with function body.
+
+func _init():
+	set_process(true)

@@ -1,7 +1,6 @@
 #pragma once
 #include "core/templates/hash_set.h"
 #include "core/variant/variant.h"
-#include "macros.h"
 
 #include <core/io/dir_access.h>
 #include <core/object/class_db.h>
@@ -16,10 +15,10 @@ Vector<String> get_recursive_dir_list_multithread(
 		const String &dir,
 		const Vector<String> &wildcards = {},
 		bool absolute = true,
-		bool include_hidden = true,
-		const Vector<String> &exclude_filters = {},
-		bool files_first = false,
 		bool exclude_dot_prefix_and_gdignore = false,
+		const Vector<String> &exclude_filters = {},
+		const Vector<String> &banned_files = {},
+		bool files_first = false,
 		bool show_progress = false);
 
 Vector<String> get_recursive_dir_list(const String &dir, const Vector<String> &wildcards = {}, bool absolute = true, bool include_hidden = true);
@@ -32,23 +31,56 @@ String get_md5(const String &dir, bool ignore_code_signature = false);
 String get_md5_for_dir(const String &dir, bool ignore_code_signature = false);
 String get_sha256(const String &file_or_dir);
 Error unzip_file_to_dir(const String &zip_path, const String &output_dir);
-Error wget_sync(const String &p_url, Vector<uint8_t> &response, int retries = 5, const Vector<String> &extra_headers = {}, float *p_progress = nullptr, bool *p_cancelled = nullptr);
-
-Error download_file_sync(const String &url, const String &output_path, float *p_progress = nullptr, bool *p_cancelled = nullptr, int64_t *r_size = nullptr);
-Error wpost_sync(const String &p_url, const Vector<uint8_t> &p_data, const Vector<String> &extra_headers = {}, bool gzip = false, float *p_progress = nullptr, bool *p_cancelled = nullptr);
 Error rimraf(const String &dir);
 bool dir_is_empty(const String &dir);
 Error touch_file(const String &path);
-bool store_var_compat(Ref<FileAccess> f, const Variant &p_var, int ver_major, bool p_full_objects = false);
-String get_full_path(const String &p_path, DirAccess::AccessType p_access);
+bool store_var_compat(Ref<FileAccess> f, const Variant &p_var, int ver_major, bool p_full_objects = false, bool p_real_t_is_double = false);
+String get_full_path(const String &p_path);
 bool directory_has_any_of(const String &p_dir_path, const Vector<String> &p_files);
 Vector<String> get_files_at(const String &p_dir, const Vector<String> &wildcards, bool absolute = true);
 Vector<String> get_directories_at_recursive(const String &p_dir, bool absolute = true, bool include_hidden = true);
 Vector<String> get_dirs_at(const String &p_dir, const Vector<String> &wildcards, bool absolute = true);
 
+_ALWAYS_INLINE_ bool base10_float_string_needs_trailing_zero(const String &p_str) {
+	int length = p_str.length();
+	if (unlikely(length == 0)) {
+		return false;
+	}
+	auto data = p_str.ptr();
+	if (!is_digit(data[0]) && data[0] != '-' && data[0] != '+') {
+		return false;
+	}
+	for (int i = 1; i < length; i++) {
+		if (!is_digit(data[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 String num_scientific(double p_num);
 String num_scientific(float p_num);
 bool is_fs_path(const String &p_path);
+
+template <class T, class F>
+bool vector_any_of(const Vector<T> &vec, F &&p_predicate) {
+	for (const T &E : vec) {
+		if (p_predicate(E)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+template <class T, class F>
+bool vector_all_of(const Vector<T> &vec, F &&p_function) {
+	for (const T &E : vec) {
+		if (!p_function(E)) {
+			return false;
+		}
+	}
+	return true;
+}
 
 template <class T, class Itr>
 void hashset_insert_iterable(HashSet<T> &hs, const Itr &iterable) {
@@ -366,6 +398,7 @@ bool detect_utf8(const PackedByteArray &p_utf8_buf);
 Error copy_dir(const String &src, const String &dst);
 
 Ref<FileAccess> open_encrypted_v3(const String &p_path, int p_mode, const Vector<uint8_t> &p_key);
+Ref<FileAccess> open_encrypted_v3_from_file(Ref<FileAccess> p_path, int p_mode, const Vector<uint8_t> &p_key);
 Vector<String> filter_error_backtraces(const Vector<String> &p_error_messages);
 Vector<String> get_files_for_paths(const Vector<String> &p_paths);
 String get_java_path();
@@ -379,6 +412,7 @@ String remove_url_query_params(const String &p_url);
 String get_safe_dir_name(const String &p_dir_name, bool p_allow_paths = false);
 Ref<Image> load_image_from_file(const String &p_path);
 Error clear_dir_except_for(const String &p_dir, const Vector<String> &p_files_or_dirs);
+String get_latin1_string_from_bytes(const PackedByteArray &p_bytes);
 
 struct CaselessHashMapComparator {
 	static _FORCE_INLINE_ bool compare(const String &p_lhs, const String &p_rhs) {
@@ -405,3 +439,16 @@ protected:
 
 // Can only pass in string literals
 #define _GDRE_CHECK_HEADER(p_buffer, p_expected_header) gdre::check_header(p_buffer, p_expected_header, sizeof(p_expected_header) - 1)
+
+#define WARN_PRINT_COND(cond, msg) \
+	if (unlikely(cond)) {          \
+		WARN_PRINT(msg);           \
+	}
+
+#ifdef DEBUG_ENABLED
+#define WARN_PRINT_DEBUG(msg) WARN_PRINT(msg)
+#define WARN_PRINT_DEBUG_COND(cond, msg) WARN_PRINT_COND(cond, msg)
+#else
+#define WARN_PRINT_DEBUG(msg) (void)(msg)
+#define WARN_PRINT_DEBUG_COND(cond, msg) (void)(msg)
+#endif

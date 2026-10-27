@@ -805,12 +805,16 @@ Error ResourceLoaderCompatText::load() {
 						bool valid = false;
 						res->set(assign, value, &valid);
 						if (!valid) {
-							missing_resource_properties[assign] = value;
+							if (!CompatFormatLoader::try_force_set_property(res, assign, value)) {
+								missing_resource_properties[assign] = value;
 #ifdef DEBUG_ENABLED
-							if (ver_major < GODOT_VERSION_MAJOR) {
-								WARN_PRINT(vformat("Failed to set deprecated %d.%d property '%s' (type: %s) on res class '%s' (class remap: %s)", ver_major, ver_minor, assign, Variant::get_type_name(value.get_type()), type, res->get_class()));
-							}
+								if (ver_major < GODOT_VERSION_MAJOR) {
+									WARN_PRINT(vformat("Failed to set deprecated %d.%d property '%s' (type: %s) on res class '%s' (remap: %s)", ver_major, ver_minor, assign, Variant::get_type_name(value.get_type()), type, res->get_class()));
+								}
 #endif
+							} else {
+								valid = true;
+							}
 						}
 					}
 				}
@@ -1023,12 +1027,16 @@ Error ResourceLoaderCompatText::load() {
 					bool valid = false;
 					resource->set(assign, value, &valid);
 					if (!valid) {
-						missing_resource_properties[assign] = value;
+						if (!CompatFormatLoader::try_force_set_property(resource, assign, value)) {
+							missing_resource_properties[assign] = value;
 #ifdef DEBUG_ENABLED
-						if (ver_major < GODOT_VERSION_MAJOR) {
-							WARN_PRINT(vformat("Failed to set deprecated %d.%d property '%s' (type: %s) on res class '%s' (class remap: %s)", ver_major, ver_minor, assign, Variant::get_type_name(value.get_type()), res_type, resource->get_class()));
-						}
+							if (ver_major < GODOT_VERSION_MAJOR) {
+								WARN_PRINT(vformat("Failed to set deprecated %d.%d property '%s' (type: %s) on res class '%s' (class remap: %s)", ver_major, ver_minor, assign, Variant::get_type_name(value.get_type()), res_type, resource->get_class()));
+							}
 #endif
+						} else {
+							valid = true;
+						}
 					}
 				}
 				//it's assignment
@@ -1875,7 +1883,7 @@ ResourceUID::ID ResourceFormatLoaderCompatText::get_resource_uid(const String &p
 }
 
 bool ResourceFormatLoaderCompatText::has_custom_uid_support() const {
-	return CompatFormatLoader::has_custom_uid_support();
+	return true;
 }
 
 void ResourceFormatLoaderCompatText::get_dependencies(const String &p_path, List<String> *p_dependencies, bool p_add_types) {
@@ -2159,8 +2167,12 @@ Error ResourceFormatSaverCompatTextInstance::save_to_file(const Ref<FileAccess> 
 	}
 #endif
 
+	ERR_FAIL_COND_V_MSG(p_resource.is_null(), ERR_INVALID_PARAMETER, "Resource is null");
+
 	if (p_path.ends_with(".tscn") || p_path.ends_with(".escn")) {
 		// If this is a MissingResource holder for a PackedScene, we need to instance it for reals
+		// We don't have to worry about replacing `p_resource` with the instantiated PackedScene because the only property
+		// that is modifed is `_bundled`, which is a Dictionary and is shared between the original and the instantiated PackedScene.
 		packed_scene = ensure_packed_scenes(p_resource);
 	}
 
@@ -2999,6 +3011,11 @@ Error ResourceFormatSaverCompatTextInstance::set_save_settings(const Ref<Resourc
 				format_version = 3;
 			} else {
 				switch (ver_major) {
+					case 0:
+						if (ver_minor == 0) {
+							ERR_FAIL_V_MSG(ERR_INVALID_PARAMETER, "Invalid version: 0.0");
+						}
+						// else fall through to the next case
 					case 1: // v1 did not have text format, but we'll convert it anyway to the v2 format for the previewer
 					case 2:
 						format_version = 1;
@@ -3099,7 +3116,7 @@ int ResourceFormatSaverCompatText::get_ver_minor_from_format_version(int ver_for
 }
 
 Error ResourceFormatSaverCompatText::save_custom(const Ref<Resource> &p_resource, const String &p_path, int ver_format, int ver_major, int ver_minor, uint32_t p_flags) {
-	ERR_FAIL_COND_V_MSG(ver_format <= 0 || ver_major <= 0, ERR_INVALID_PARAMETER, "Invalid version info");
+	ERR_FAIL_COND_V_MSG(ver_format <= 0 || ver_major < 0, ERR_INVALID_PARAMETER, "Invalid version info");
 
 	p_flags = CompatFormatLoader::set_version_info_in_flags(p_flags, ver_format, ver_major, ver_minor);
 	return ResourceFormatSaverCompatText::save(p_resource, p_path, p_flags);
@@ -3120,89 +3137,42 @@ bool is_packed_scene(const Ref<Resource> &p_resource) {
 	return p_resource.is_valid() && _resource_get_class(p_resource) == "PackedScene";
 }
 
-Ref<PackedScene> _ensure_resource_is_packed_scene(const Ref<Resource> &p_resource, HashMap<String, Ref<Resource>> &p_seen_resources, HashSet<Object *> &seen_objects, int recursion_depth);
-
-Variant scan_variant(const Variant &v, HashMap<String, Ref<Resource>> &p_seen_resources, HashSet<Object *> &seen_objects, int recursion_depth) {
-	ERR_FAIL_COND_V_MSG(recursion_depth > 1024, Variant(), "Recursion depth exceeded");
-	recursion_depth++;
-	Variant result = v;
-	switch (v.get_type()) {
-		case Variant::OBJECT: {
-			Ref<Resource> res = v;
-			if (is_packed_scene(res)) {
-				Ref<PackedScene> sub_scene;
-				if (!p_seen_resources.has(res->get_path())) {
-					if (_resource_get_class(res) == "PackedScene") {
-						sub_scene = _ensure_resource_is_packed_scene(res, p_seen_resources, seen_objects, recursion_depth);
-					}
-				} else {
-					sub_scene = p_seen_resources.get(res->get_path());
-				}
-				if (sub_scene.is_valid()) {
-					p_seen_resources[res->get_path()] = sub_scene;
-					result = sub_scene;
-				} else {
-					p_seen_resources[res->get_path()] = res;
-					result = res;
-				}
-			} else if (res.is_valid()) {
-				if (!p_seen_resources.has(res->get_path())) {
-					List<PropertyInfo> property_list;
-					res->get_property_list(&property_list);
-					for (const PropertyInfo &pi : property_list) {
-						Variant v = scan_variant(res->get(pi.name), p_seen_resources, seen_objects, recursion_depth);
-						res->set(pi.name, v);
-					}
-					p_seen_resources[res->get_path()] = res;
-				}
-			} else if (Object *obj = v.operator Object *(); obj != nullptr && !seen_objects.has(obj)) {
-				seen_objects.insert(obj);
-				List<PropertyInfo> property_list;
-				obj->get_property_list(&property_list);
-				for (const PropertyInfo &pi : property_list) {
-					if (pi.usage & PROPERTY_USAGE_STORAGE) {
-						Variant v = scan_variant(obj->get(pi.name), p_seen_resources, seen_objects, recursion_depth);
-						obj->set(pi.name, v);
-					}
-				}
-			}
-		} break;
-		case Variant::ARRAY: {
-			Array a = v;
-			for (int j = 0; j < a.size(); j++) {
-				a[j] = scan_variant(a[j], p_seen_resources, seen_objects, recursion_depth);
-			}
-			result = a;
-		} break;
-		case Variant::DICTIONARY: {
-			Dictionary d;
-			for (const KeyValue<Variant, Variant> &kv : v.operator Dictionary()) {
-				Variant key = scan_variant(kv.key, p_seen_resources, seen_objects, recursion_depth);
-				Variant value = scan_variant(kv.value, p_seen_resources, seen_objects, recursion_depth);
-				d[key] = value;
-			}
-			v.operator Dictionary().clear();
-			v.operator Dictionary().assign(d);
-			result = v;
-		} break;
-		default: {
-		}
-	}
-	return result;
-}
-
-Ref<PackedScene> _ensure_resource_is_packed_scene(const Ref<Resource> &p_resource, HashMap<String, Ref<Resource>> &p_seen_resources, HashSet<Object *> &seen_objects, int recursion_depth) {
+Ref<PackedScene> _ensure_resource_is_packed_scene(const Ref<Resource> &p_resource, int recursion_depth, HashMap<Ref<Resource>, Ref<PackedScene>> &r_replaced_packed_scenes) {
 	Ref<PackedScene> r_packed_scene = p_resource;
+	if (recursion_depth > 256) {
+		ERR_PRINT("Recursion depth exceeded.");
+		return r_packed_scene;
+	}
 	if (_resource_get_class(p_resource) == "PackedScene") {
-		Dictionary bundle = scan_variant(p_resource->get("_bundled"), p_seen_resources, seen_objects, recursion_depth);
+		Dictionary bundle = p_resource->get("_bundled");
 		// we need to go through the variants in the bundle and ensure that any MissingResources that are PackedScenes are also replaced with instantiated packed scenes
 		// this is because of PackedScene::SceneState::get_node_instance, which returns a Ref<PackedScene>, which will be null if it's not an instance of a PackedScene
+		// (We do not have to worry about PackedScenes embedded in other resources/dictionaries/arrays because this only matters for SceneState::get_node_instance)
+		Array arr = bundle.get("variants", Array());
+		if (arr.size() > 0) {
+			for (int i = 0; i < arr.size(); i++) {
+				Ref<Resource> res = arr[i];
+				if (res.is_valid() && res->get_save_class() == "PackedScene") {
+					if (r_replaced_packed_scenes.has(res)) {
+						arr[i] = r_replaced_packed_scenes[res];
+					} else {
+						arr[i] = _ensure_resource_is_packed_scene(res, recursion_depth, r_replaced_packed_scenes);
+						r_replaced_packed_scenes[res] = arr[i];
+					}
+				}
+			}
+			bundle.set("variants", arr);
+		}
 		if (r_packed_scene.is_null()) { // MissingResource
 			r_packed_scene = Ref<PackedScene>(memnew(PackedScene));
 			if (!bundle.is_empty()) {
 				r_packed_scene->set("_bundled", bundle);
 			}
+			r_packed_scene->set_script(p_resource->get_script());
+			r_packed_scene->set_local_to_scene(p_resource->is_local_to_scene());
 			r_packed_scene->set_path_cache(p_resource->get_path());
+			r_packed_scene->set_name(p_resource->get_name());
+			r_packed_scene->set_scene_unique_id(p_resource->get_scene_unique_id());
 			r_packed_scene->merge_meta_from(p_resource.ptr());
 		}
 	}
@@ -3210,7 +3180,14 @@ Ref<PackedScene> _ensure_resource_is_packed_scene(const Ref<Resource> &p_resourc
 }
 
 Ref<PackedScene> ResourceFormatSaverCompatTextInstance::ensure_packed_scenes(const Ref<Resource> &p_resource) {
-	HashMap<String, Ref<Resource>> seen_resources;
-	HashSet<Object *> seen_objects;
-	return _ensure_resource_is_packed_scene(p_resource, seen_resources, seen_objects, 0);
+	auto info = ResourceInfo::get_info_from_resource(p_resource);
+	if (info.is_valid()) {
+		if ((info->load_type == ResourceInfo::REAL_LOAD || info->load_type == ResourceInfo::GLTF_LOAD) && p_resource->get_class() == "PackedScene") {
+			return p_resource;
+		}
+	} else if (p_resource->get_class() == "PackedScene") {
+		return p_resource;
+	}
+	HashMap<Ref<Resource>, Ref<PackedScene>> replaced_packed_scenes;
+	return _ensure_resource_is_packed_scene(p_resource, 0, replaced_packed_scenes);
 }

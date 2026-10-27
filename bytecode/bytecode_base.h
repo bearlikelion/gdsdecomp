@@ -167,6 +167,12 @@ public:
 		TOKEN_LINE_MASK = (1 << TOKEN_LINE_BITS) - 1,
 	};
 
+	enum IndentType {
+		INDENT_TYPE_TABS,
+		INDENT_TYPE_SPACES,
+		INDENT_TYPE_MAX,
+	};
+
 	// bytecode_version, ids,  constants, tokens, lines, columns
 	struct ScriptState {
 		int bytecode_version = -1;
@@ -259,8 +265,9 @@ public:
 	String get_script_text();
 	String get_error_message();
 	String get_constant_string(const Vector<Variant> &constants, uint32_t constId);
+	String get_constant_string(const Variant &var);
 	Vector<String> get_compile_errors(const Vector<uint8_t> &p_buffer);
-	Error test_bytecode_match(const Vector<uint8_t> &p_buffer1, const Vector<uint8_t> &p_buffer2, bool ignore_lines_cols = false, bool print_verbose = true);
+	Error test_bytecode_match(const Vector<uint8_t> &p_buffer1, const Vector<uint8_t> &p_buffer2, bool ignore_columns, bool ignore_lines, bool print_verbose = true);
 
 	Dictionary to_json() const;
 

@@ -160,7 +160,7 @@ public class GodotModuleDecompiler
 	}
 
 
-	public void AddSubProjects(string assemblyPath, DotNetCoreDepInfo depInfo, List<string> names, HashSet<string> canonicalSubDirs)
+	public void AddSubProjects(string assemblyPath, DotNetCoreDepInfo depInfo, List<string> names, HashSet<string> mainModuleSubDirs, HashSet<string> otherSubDirs)
 	{
 		foreach (var dep in depInfo.deps.Where(d => d is { Type: "project" })
 			         .OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
@@ -172,6 +172,7 @@ public class GodotModuleDecompiler
 			}
 
 			names.Add(dep.Name);
+			var existingSubdirs = otherSubDirs.Where(subdir => subdir == dep.Name || Path.GetFileName(subdir) == dep.Name).ToHashSet();
 
 			var assemblynameRef = dep.AssemblyRef;
 			var supposedPath = Path.Combine(Path.GetDirectoryName(assemblyPath) ?? "", assemblynameRef.Name + ".dll");
@@ -186,8 +187,8 @@ public class GodotModuleDecompiler
 
 			if (reference is PEFile module)
 			{
-				var subdir = canonicalSubDirs.Contains(module.Name) ? "subprojects" + "/" + module.Name : module.Name;
-				while (subdir != null && canonicalSubDirs.Contains(subdir))
+				var subdir = existingSubdirs.Count == 1 ? existingSubdirs.First() : (mainModuleSubDirs.Contains(module.Name) ? "subprojects" + "/" + module.Name : module.Name);
+				while (subdir != null && mainModuleSubDirs.Contains(subdir))
 				{
 					subdir = "_" + subdir;
 				}
@@ -195,7 +196,7 @@ public class GodotModuleDecompiler
 				AdditionalModules.Add(new GodotModule(module, dep, subdir, Settings, AssemblyResolver));
 			}
 
-			AddSubProjects(assemblyPath, dep, names, canonicalSubDirs);
+			AddSubProjects(assemblyPath, dep, names, mainModuleSubDirs, otherSubDirs);
 		}
 	}
 
@@ -219,6 +220,13 @@ public class GodotModuleDecompiler
 		{
 			AssemblyResolver.AddSearchDirectory(path);
 		}
+		if (settings!.AutomaticallySearchWorkshopDependencies && SteamHelpers.IsAssemblyPathInWorkshopFolder(assemblyPath))
+		{
+			foreach (var path in SteamHelpers.GetAdditionalAssemblySearchPathsForWorkshopModule(mod, ReferencePaths ?? []))
+			{
+				AssemblyResolver.AddSearchDirectory(path);
+			}
+		}
 		MainModule = new GodotModule(mod, _mainDepInfo, null, Settings, AssemblyResolver);
 		CustomVersionDetected = DetectCustomVersionFromPrerelease(_mainDepInfo);
 
@@ -236,13 +244,15 @@ public class GodotModuleDecompiler
 		List<string> names = [];
 		if (Settings.CreateAdditionalProjectsForProjectReferences && MainModule.depInfo != null)
 		{
-			HashSet<string> canonicalSubDirs = GodotStuff.GetCanonicalGodotScriptPaths(MainModule.Module,
+			HashSet<string> mainModuleSubDirs = GodotStuff.GetCanonicalGodotScriptPaths(MainModule.Module,
 			 	MainModule.GetProjectDecompiler().GetTypesToDecompile(MainModule.Module), godot3xMetadata)
 				.Where(p => !string.IsNullOrEmpty(Path.GetDirectoryName(p)))
 				.Select(p => Path.GetDirectoryName(p)!)
 				.ToHashSet();
 
-			AddSubProjects(assemblyPath, MainModule.depInfo, names, canonicalSubDirs);
+			HashSet<string> otherSubDirs = this.originalProjectFiles.Select(path => Path.GetDirectoryName(path) ?? "").Where(p => !string.IsNullOrEmpty(p) && !mainModuleSubDirs.Contains(p)).ToHashSet() ?? [];
+
+			AddSubProjects(assemblyPath, MainModule.depInfo, names, mainModuleSubDirs, otherSubDirs);
 
 		}
 
@@ -494,7 +504,7 @@ public class GodotModuleDecompiler
 		var decompiler = module.CreateCSharpDecompilerWithPartials(types);
 		var tree = decompiler.DecompileTypes(types);
 		var stringWriter = new StringWriter();
-		tree.AcceptVisitor(new GodotCSharpOutputVisitor(stringWriter, Settings.CSharpFormattingOptions));
+		tree.AcceptVisitor(new GodotCSharpOutputVisitor(stringWriter, Settings, Settings.EmitILAnnotationComments, decompiler));
 		return stringWriter.ToString();
 	}
 
@@ -547,7 +557,7 @@ public class GodotModuleDecompiler
 			.Where(p => p.GetAttributes().Any(a => a.AttributeType.Name == "ExportAttribute")).ToList();
 		var fields = typeDef.Fields.Where(p => p.GetAttributes().Any(a => a.AttributeType.Name.Contains("Export")))
 			.ToList();
-		var signals = GodotStuff.GetSignalsInClass(typeDef);
+		var signals = GodotStuff.GetSignalDelegatesInClass(typeDef);
 		var syntaxTree = decompiler.DecompileTypes([type]);
 		var isTool = typeDef.GetAttributes().FirstOrDefault(a => a.AttributeType.Name == "ToolAttribute") != null;
 
@@ -618,7 +628,13 @@ public class GodotModuleDecompiler
 				args = invokeMethod.Parameters.Select(p => p.Name).ToArray();
 				argTypes = invokeMethod.Parameters.Select(p => p.Type.Name).ToArray();
 			}
-			signalsInfo.Add(new MethodInfo(signal.Name, "void", args, argTypes, false, false, false));
+			var name = signal.Name;
+			 // 4.x signal delegate name requires the suffix, 3.x signals delegate name is the same as the signal name
+			if (signal.Name.EndsWith(GodotStuff.SIGNAL_DELEGATE_SUFFIX))
+			{
+				name = name.Substring(0, name.Length - GodotStuff.SIGNAL_DELEGATE_SUFFIX.Length);
+			}
+			signalsInfo.Add(new MethodInfo(name, "void", args, argTypes, false, false, false));
 		}
 
 		foreach (var method in typeDef.Methods)
@@ -665,6 +681,26 @@ public class GodotModuleDecompiler
 			p => string.IsNullOrEmpty(p) ? "" : "res://" + p
 		).ToArray();
 
+		ITypeDefinition? GetDirectBaseType(List<IType> baseTypes){
+			ITypeDefinition? godotSharpBaseType = null;
+			foreach (var baseType in baseTypes)
+			{
+				var baseTypeDef = baseType.GetDefinition();
+				if (baseTypeDef != null && GodotStuff.IsGodotClass(baseTypeDef))
+				{
+					if (baseTypeDef.GetAttributes().Any(a => a.AttributeType.Name == "GlobalClassAttribute") || baseTypeDef.ParentModule?.AssemblyName == "GodotSharp"){
+						godotSharpBaseType = baseTypeDef;
+						break;
+					} else {
+						return GetDirectBaseType(baseTypeDef.DirectBaseTypes.ToList());
+					}
+				}
+			}
+			return godotSharpBaseType;
+		}
+
+		var godotSharpBaseType = GetDirectBaseType(baseTypes);
+
 		string iconPath = "";
 		if (typeDef.GetAttributes().Any(a => a.AttributeType.Name == "IconAttribute"))
 		{
@@ -679,7 +715,7 @@ public class GodotModuleDecompiler
 			syntaxTree = decompiler.DecompileTypes(types);
 		}
         StringWriter stringWriter = new StringWriter();
-        syntaxTree.AcceptVisitor(new GodotCSharpOutputVisitor(stringWriter, Settings.CSharpFormattingOptions));
+        syntaxTree.AcceptVisitor(new GodotCSharpOutputVisitor(stringWriter, Settings, Settings.EmitILAnnotationComments, decompiler));
 		var scriptText = stringWriter.ToString();
 
 		var scriptInfo = new GodotScriptInfo(
@@ -688,6 +724,7 @@ public class GodotModuleDecompiler
 			typeDef.Name,
 			baseTypes.Select(t => t.Name).ToArray(),
 			baseTypePaths,
+			godotSharpBaseType?.Name ?? null,
 			propsInfos.ToArray(),
 			signalsInfo.ToArray(),
 			methodsInfo.ToArray(),
@@ -784,7 +821,7 @@ public class GodotModuleDecompiler
 
 		public override void VisitInterpolatedStringText(InterpolatedStringText interpolatedStringText)
 		{
-			if (interpolatedStringText.Text != null)
+			if (!string.IsNullOrEmpty(interpolatedStringText.Text))
 			{
 				strings.Add(interpolatedStringText.Text);
 			}
@@ -818,71 +855,93 @@ public class GodotModuleDecompiler
 
 		void VisitAnyNode(AnyNode anyNode)
 		{
-			VisitChildren(anyNode);
+			if (anyNode is not null)
+			{
+				VisitChildren(anyNode!);
+			}
 		}
 
 		void VisitBackreference(Backreference backreference)
 		{
-			VisitChildren(backreference);
+			if (backreference is not null)
+			{
+				VisitChildren(backreference!);
+			}
 		}
 
 		void VisitIdentifierExpressionBackreference(IdentifierExpressionBackreference identifierExpressionBackreference)
 		{
-			VisitChildren(identifierExpressionBackreference);
+			if (identifierExpressionBackreference is not null)
+			{
+				VisitChildren(identifierExpressionBackreference!);
+			}
 		}
 
 		void VisitChoice(Choice choice)
 		{
-			VisitChildren(choice);		}
+			if (choice is not null)
+			{
+				VisitChildren(choice!);
+			}
+		}
 
 		void VisitNamedNode(NamedNode namedNode)
 		{
-			VisitChildren(namedNode);
+			if (namedNode is not null)
+			{
+				VisitChildren(namedNode!);
+			}
 		}
 
 		void VisitRepeat(Repeat repeat)
 		{
-			VisitChildren(repeat);
+			if (repeat is not null)
+			{
+				VisitChildren(repeat!);
+			}
 		}
 
 		void VisitOptionalNode(OptionalNode optionalNode)
 		{
-			VisitChildren(optionalNode);
+			if (optionalNode is not null)
+			{
+				VisitChildren(optionalNode!);
+			}
 		}
 
 		void VisitNodeInPattern(INode childNode)
 		{
-			if (childNode is AstNode)
+			if (childNode is AstNode astNode)
 			{
-				((AstNode)childNode).AcceptVisitor(this);
+				astNode.AcceptVisitor(this);
 			}
-			else if (childNode is IdentifierExpressionBackreference)
+			else if (childNode is IdentifierExpressionBackreference backreference)
 			{
-				VisitIdentifierExpressionBackreference((IdentifierExpressionBackreference)childNode);
+				VisitIdentifierExpressionBackreference(backreference);
 			}
-			else if (childNode is Choice)
+			else if (childNode is Choice choice)
 			{
-				VisitChoice((Choice)childNode);
+				VisitChoice(choice);
 			}
-			else if (childNode is AnyNode)
+			else if (childNode is AnyNode node)
 			{
-				VisitAnyNode((AnyNode)childNode);
+				VisitAnyNode(node);
 			}
-			else if (childNode is Backreference)
+			else if (childNode is Backreference backreference1)
 			{
-				VisitBackreference((Backreference)childNode);
+				VisitBackreference(backreference1);
 			}
-			else if (childNode is NamedNode)
+			else if (childNode is NamedNode node1)
 			{
-				VisitNamedNode((NamedNode)childNode);
+				VisitNamedNode(node1);
 			}
-			else if (childNode is OptionalNode)
+			else if (childNode is OptionalNode node2)
 			{
-				VisitOptionalNode((OptionalNode)childNode);
+				VisitOptionalNode(node2);
 			}
-			else if (childNode is Repeat)
+			else if (childNode is Repeat repeat)
 			{
-				VisitRepeat((Repeat)childNode);
+				VisitRepeat(repeat);
 			}
 		}
 	}
@@ -966,5 +1025,22 @@ public class GodotModuleDecompiler
 		Console.WriteLine($"Dumped {strings.Count} strings to {outputFile}");
 	}
 
+	public string[] GetGlobalClassFiles() {
+		var godotObjectFiles = new List<string>();
+		List<GodotModule> list = [MainModule];
+		foreach (var module in list.Concat(AdditionalModules))
+		{
+			var decompiler = module.CreateCSharpDecompilerWithPartials(module.fileMap.SelectMany(kv => kv.Value).ToHashSet());
+			foreach (var kv in module.fileMap){
+				if (kv.Value.Any(type => {
+					var typeDef = decompiler.TypeSystem.MainModule.GetDefinition(type);
+					return typeDef != null && GodotStuff.IsGodotClass(typeDef) && typeDef.GetAttributes().Any(a => a.AttributeType.Name == "GlobalClassAttribute");
+					})){
+					godotObjectFiles.Add(kv.Key);
+				}
+			}
+		}
+		return godotObjectFiles.ToArray();
+	}
 
 }

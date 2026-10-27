@@ -3,7 +3,7 @@ extends GDREWindow
 
 @export var show_ephemeral_settings: bool = false
 
-signal config_changed(changed_settings: Dictionary[String, Variant])
+signal config_changed(changed_settings: Dictionary[String, Array])
 
 func create_section_settings() -> LabelSettings:
 	var label_settings: LabelSettings = LabelSettings.new()
@@ -94,13 +94,11 @@ func make_button_label(text: String) -> Label:
 
 
 func set_setting_value(setting: GDREConfigSetting, value: Variant):
+	if setting.get_type() == TYPE_INT:
+		value = int(value)
+	elif setting.get_type() == TYPE_FLOAT:
+		value = float(value)
 	setting_value_map[setting] = value
-
-func popup_error(message: String):
-	%ErrorDialog.dialog_text = message
-	%ErrorDialog.popup_centered()
-
-
 
 func setting_callback(setting: GDREConfigSetting, value: Variant, control: Control):
 	print('setting "' + setting.get_brief_description() + '" set to ', value)
@@ -123,7 +121,7 @@ func setting_callback(setting: GDREConfigSetting, value: Variant, control: Contr
 					force_change = true
 					setting_value_map[s] = s.get_value()
 		else:
-			popup_error(error_message)
+			popup_error_box(error_message)
 			setting.clear_error_message()
 
 	else:
@@ -244,7 +242,9 @@ func create_setting_button(setting: GDREConfigSetting) -> Control:
 	elif setting.get_type() == TYPE_INT:
 		button = SpinBox.new()
 		button.value = value
-		button.step = 1
+		button.min_value = setting.get_min_value()
+		button.max_value = setting.get_max_value()
+		button.step = setting.get_step_value()
 		var label: Label = make_button_label(setting.get_brief_description())
 		label.tooltip_text = setting.get_description()
 		control = make_button_hbox(setting, button, label)
@@ -252,7 +252,9 @@ func create_setting_button(setting: GDREConfigSetting) -> Control:
 	elif setting.get_type() == TYPE_FLOAT:
 		button = SpinBox.new()
 		button.value = value
-		button.step = 0.1
+		button.min_value = setting.get_min_value()
+		button.max_value = setting.get_max_value()
+		button.step = setting.get_step_value()
 		var label: Label = make_button_label(setting.get_brief_description())
 		label.tooltip_text = setting.get_description()
 		control = make_button_hbox(setting, button, label)
@@ -266,6 +268,15 @@ func create_setting_button(setting: GDREConfigSetting) -> Control:
 		label.tooltip_text = setting.get_description()
 		control = make_button_hbox(setting, button, label)
 		button.text_changed.connect(func(val): setting_callback(setting, val, control))
+	elif setting.get_type() == TYPE_PACKED_STRING_ARRAY: # TODO: better handling of this, right now we require the user to input a semicolon-separated list of items
+		button = LineEdit.new()
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.custom_minimum_size = Vector2i(80,0)
+		button.text = ';'.join(value)
+		var label: Label = make_button_label(setting.get_brief_description())
+		label.tooltip_text = 'Seperate items with a semicolon (;).\n' + setting.get_description()
+		control = make_button_hbox(setting, button, label)
+		button.text_changed.connect(func(val): setting_callback(setting, val.split(";"), control))
 
 	button.tooltip_text = setting.get_description()
 	control.tooltip_text = setting.get_description()
@@ -331,10 +342,10 @@ func _render_settings():
 
 
 func save_settings():
-	var changed_settings: Dictionary[String, Variant] = {}
+	var changed_settings: Dictionary[String, Array] = {}
 	for setting: GDREConfigSetting in setting_value_map.keys():
 		if setting.get_value() != setting_value_map[setting]:
-			changed_settings[setting.get_full_name()] = setting_value_map[setting]
+			changed_settings[setting.get_full_name()] = [setting.get_value(), setting_value_map[setting]]
 			setting.set_value(setting_value_map[setting])
 	GDREConfig.save_config()
 	if changed_settings.size() != 0 or force_change:
@@ -387,7 +398,6 @@ func _close_requested():
 		# so we have to re-show ourselves when a close is requested
 		self.show()
 		unclose = true
-		print("has unsaved changes")
 		%ConfirmClose.popup_centered()
 		return
 	#print("closing")

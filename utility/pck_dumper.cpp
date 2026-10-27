@@ -55,11 +55,16 @@ void PckDumper::reset() {
 
 Error PckDumper::_check_md5_all_files(Vector<String> &broken_files, int &checked_files) {
 	reset();
-	auto ext = GDRESettings::get_singleton()->get_pack_type();
-	// uint64_t last_progress_upd = OS::get_singleton()->get_ticks_usec();
-
-	if (ext != GDRESettings::PackInfo::PCK && ext != GDRESettings::PackInfo::EXE) {
-		print_verbose("Not a pack file, skipping MD5 check...");
+	auto packs = GDRESettings::get_singleton()->get_pack_info_list();
+	bool no_packs = true;
+	for (Ref<PackInfo> pack : packs) {
+		if (pack->get_type() == PackInfo::PCK || pack->get_type() == PackInfo::EXE) {
+			no_packs = false;
+			break;
+		}
+	}
+	if (no_packs) {
+		print_verbose("No PCK/EXE loaded, skipping MD5 check...");
 		return ERR_SKIP;
 	}
 	Error err = OK;
@@ -192,10 +197,11 @@ Error PckDumper::_pck_dump_to_dir(
 	gdre::CaselessHashSet seen_paths;
 	HashSet<String> files_to_extract_set = gdre::vector_to_hashset(files_to_extract);
 	for (int i = 0; i < files.size(); i++) {
-		if (files.get(i)->is_dummy()) {
+		const auto &file = files.get(i);
+		if (file->is_dummy() && file->get_size() <= 1) {
+			// empty dummy file
 			continue;
 		}
-		const auto &file = files.get(i);
 		String path = file->get_path();
 		if (!files_to_extract_set.is_empty() && !files_to_extract_set.has(path)) {
 			continue;

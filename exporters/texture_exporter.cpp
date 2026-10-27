@@ -2,6 +2,7 @@
 
 #include "compat/resource_compat_binary.h"
 #include "compat/resource_loader_compat.h"
+#include "core/variant/variant.h"
 #include "core/version_generated.gen.h"
 #include "gdre_test_macros.h"
 #include "scene/resources/dpi_texture.h"
@@ -9,12 +10,13 @@
 
 #include "core/error/error_list.h"
 #include "core/io/file_access.h"
-#include "core/io/image_loader.h"
+#include "core/io/image_resource_format.h"
 #include "core/io/resource_loader.h"
 #include "exporters/export_report.h"
 #include "scene/resources/atlas_texture.h"
 #include "scene/resources/compressed_texture.h"
 #include "scene/resources/texture.h"
+#include "utility/gdre_settings.h"
 #include "utility/image_saver.h"
 #include "utility/resource_info.h"
 
@@ -211,6 +213,12 @@ Error decompress_and_set_tex_params(Ref<Image> p_img, Ref<ExportReport> p_report
 		return OK;
 	}
 	auto p_import_info = p_report->get_import_info();
+	ERR_FAIL_COND_V_MSG(!p_import_info.is_valid(), ERR_PARSE_ERROR, "Import info is not valid");
+
+	int ver_minor = p_import_info->get_ver_minor();
+	if (ver_minor == 0 && GDRESettings::get_singleton()->is_pack_loaded()) {
+		ver_minor = GDRESettings::get_singleton()->get_ver_minor();
+	}
 
 	String ext = p_import_info->get_source_file().get_extension().to_lower();
 	Dictionary params;
@@ -292,7 +300,7 @@ Error decompress_and_set_tex_params(Ref<Image> p_img, Ref<ExportReport> p_report
 	params["compress/lossy_quality"] = 1.0; // prevent generational loss
 
 	// Set Basis Universal parameters if used
-	if (p_import_info->get_ver_minor() >= 5) {
+	if (ver_minor >= 5) {
 		params["compress/uastc_level"] = 2; // Default is Fastest, but force to Medium to prevent generational loss
 		params["compress/rdo_quality_loss"] = 0; // Default
 	}
@@ -336,6 +344,14 @@ Error decompress_and_set_tex_params(Ref<Image> p_img, Ref<ExportReport> p_report
 		params["roughness/src_normal"] = "";
 
 		// Set processing options
+
+		// remap channels; always set to RGBA
+		if (ver_minor >= 5) {
+			params["process/channel_remap/red"] = 0;
+			params["process/channel_remap/green"] = 1;
+			params["process/channel_remap/blue"] = 2;
+			params["process/channel_remap/alpha"] = 3;
+		}
 		params["process/fix_alpha_border"] = false; // default true, but forcing to false to prevent re-fixing
 		params["process/premult_alpha"] = false; // default false, and forcing cuz destructive
 		params["process/normal_map_invert_y"] = false; // default true, but forcing to false to prevent re-inverting
@@ -986,19 +1002,27 @@ Error TextureExporter::_convert_layered_2d(const String &p_path, const String &d
 	return OK;
 }
 
-Error TextureExporter::_convert_svg(const String &p_path, const String &dest_path, Ref<ExportReport> report) {
+Error TextureExporter::_convert_svg(const String &p_path, const String &dest_path, bool lossy, Ref<ExportReport> report) {
 	Error err;
 	Ref<DPITexture> tex = ResourceCompatLoader::non_global_load(p_path, "", &err);
 	if (err == ERR_UNAVAILABLE) {
 		print_line("Did not convert deprecated SVG resource " + p_path);
 		return err;
 	}
-	String source = tex->get_source();
-	ERR_FAIL_COND_V_MSG(source.is_empty(), ERR_FILE_CORRUPT, "SVG source is empty: " + p_path);
-	auto fa = FileAccess::open(dest_path, FileAccess::WRITE);
-	ERR_FAIL_COND_V_MSG(fa.is_null(), ERR_FILE_CANT_WRITE, "Cannot write to file: " + dest_path);
-	fa->store_string(source);
-	fa->close();
+	if (dest_path.has_extension("svg") || !ImageSaver::is_supported_extension(dest_path.get_extension())) {
+		String source = tex->get_source();
+		ERR_FAIL_COND_V_MSG(source.is_empty(), ERR_FILE_CORRUPT, "SVG source is empty: " + p_path);
+		auto fa = FileAccess::open(dest_path, FileAccess::WRITE);
+		ERR_FAIL_COND_V_MSG(fa.is_null(), ERR_FILE_CANT_WRITE, "Cannot write to file: " + dest_path);
+		fa->store_string(source);
+		fa->close();
+	} else {
+		Ref<Image> img = tex->get_image();
+		ERR_FAIL_COND_V_MSG(img.is_null(), ERR_FILE_CORRUPT, "Image is null for texture " + tex->get_path());
+		err = ImageSaver::save_image(dest_path, img, lossy, 1.0, false);
+		ERR_FAIL_COND_V_MSG(err != OK, err, "Failed to save image: " + dest_path);
+	}
+
 	if (report.is_valid() && report->get_import_info().is_valid() && report->get_import_info()->get_ver_major() >= 4) {
 		Dictionary params;
 		Ref<ResourceInfo> res_info = ResourceInfo::get_info_from_resource(tex);
@@ -1011,46 +1035,23 @@ Error TextureExporter::_convert_svg(const String &p_path, const String &dest_pat
 	return OK;
 }
 
-Ref<ExportReport> TextureExporter::export_resource(const String &output_dir, Ref<ImportInfo> iinfo) {
-	String path = iinfo->get_path();
-	String source = iinfo->get_source_file();
-	bool lossy = false;
-	int ver_major = iinfo->get_ver_major();
-	int ver_minor = iinfo->get_ver_minor();
-	Ref<ExportReport> report = memnew(ExportReport(iinfo, get_name()));
+Error get_extant_texture_path(Ref<ImportInfo> iinfo, String &path) {
+	path = iinfo->get_path();
 
-	// Sonic Colors Unlimited specific hack: We don't support atsc and nx-low formats, so we need to set the path to something else
-	if (ver_major == 3 && ver_minor == 1) {
-		String format_type = path.get_basename().get_extension();
-		Vector<String> banned_types = { "atsc", "nx-low", "atsc-low" };
-		if (banned_types.has(format_type)) {
-			bool found = false;
-			Vector<String> dest_files = iinfo->get_dest_files();
-			if (dest_files.size() > 0) {
-				String new_path = path.get_basename().get_basename() + ".s3tc" + path.get_extension();
-				if (FileAccess::exists(new_path)) {
-					path = new_path;
-					found = true;
-				}
-				if (!found) {
-					for (auto &dest : dest_files) {
-						String fmt = dest.get_basename().get_extension();
-						if (!banned_types.has(format_type) && FileAccess::exists(new_path)) {
-							path = dest;
-							found = true;
-							break;
-						}
-					}
-				}
-			}
-			if (!found) {
-				report->set_error(ERR_UNAVAILABLE);
-				report->set_message("Cannot convert custom SCU texture format");
-				report->set_unsupported_format_type(format_type);
+	if (iinfo->get_dest_files().size() > 1 && iinfo->get_ver_major() >= 3) {
+		// Prefer s3tc textures over other formats for v3 (the etc2 compressor was vastly inferior to s3tc in v3, and v3 astc is SCU-only and lower-quality than s3tc)
+		static const Vector<String> preferred_formats_v3 = { "s3tc", "etc2", "atsc", "s3tc-low", "nx-low", "atsc-low" };
+		static const Vector<String> preferred_formats_v4 = { "bptc", "astc", "s3tc", "etc2" };
+		const Vector<String> &preferred_formats = iinfo->get_ver_major() <= 3 ? preferred_formats_v3 : preferred_formats_v4;
+		for (int i = 0; i < preferred_formats.size(); i++) {
+			String new_path = iinfo->get_iinfo_val("remap", "path." + preferred_formats[i], String());
+			if (!new_path.is_empty() && FileAccess::exists(new_path)) {
+				path = new_path;
+				return OK;
 			}
 		}
 	}
-	report->set_resources_used({ path });
+
 	if (!FileAccess::exists(path)) {
 		path = "";
 		for (auto &dest : iinfo->get_dest_files()) {
@@ -1059,14 +1060,30 @@ Ref<ExportReport> TextureExporter::export_resource(const String &output_dir, Ref
 				break;
 			}
 		}
-		if (path.is_empty()) {
-			report->set_error(ERR_FILE_NOT_FOUND);
-			report->set_message("No existing textures found for this import");
-			report->append_message_detail({ "Possibles:" });
-			report->append_message_detail(iinfo->get_dest_files());
-			return report;
-		}
 	}
+	if (path.is_empty()) {
+		return ERR_FILE_NOT_FOUND;
+	}
+	return OK;
+}
+
+Ref<ExportReport> TextureExporter::export_resource(const String &output_dir, Ref<ImportInfo> iinfo) {
+	String path = iinfo->get_path();
+	String source = iinfo->get_source_file();
+	bool lossy = false;
+	int ver_major = iinfo->get_ver_major();
+	int ver_minor = iinfo->get_ver_minor();
+	Ref<ExportReport> report = memnew(ExportReport(iinfo, get_name()));
+
+	Error err = get_extant_texture_path(iinfo, path);
+	if (err) {
+		report->set_error(ERR_FILE_NOT_FOUND);
+		report->set_message("No existing textures found for this import");
+		report->append_message_detail({ "Possibles:" });
+		report->append_message_detail(iinfo->get_dest_files());
+		return report;
+	}
+	report->set_resources_used({ path });
 	String importer = iinfo->get_importer();
 
 	// for Godot 2.x resources, we can easily rewrite the metadata to point to a renamed file with a different extension,
@@ -1112,7 +1129,6 @@ Ref<ExportReport> TextureExporter::export_resource(const String &output_dir, Ref
 		}
 	}
 
-	Error err = OK;
 	String img_format = "bitmap";
 	String dest_path = output_dir.path_join(iinfo->get_export_dest().replace("res://", ""));
 	if (importer == "image") {
@@ -1148,7 +1164,7 @@ Ref<ExportReport> TextureExporter::export_resource(const String &output_dir, Ref
 	} else if (importer == "texture" || importer == "texture_2d") {
 		err = _convert_tex(path, dest_path, lossy, img_format, report);
 	} else if (importer == "svg") {
-		err = _convert_svg(path, dest_path, report);
+		err = _convert_svg(path, dest_path, lossy, report);
 	} else {
 		report->set_error(ERR_UNAVAILABLE);
 		report->set_message("Unsupported texture importer: " + importer);
@@ -1230,6 +1246,10 @@ String TextureExporter::get_name() const {
 }
 
 String TextureExporter::get_default_export_extension(const String &res_path) const {
+	String extension = res_path.get_extension();
+	if (res_path.has_extension("dpitex")) {
+		return "svg";
+	}
 	return "png";
 }
 
@@ -1359,4 +1379,60 @@ Error TextureExporter::test_export(const Ref<ExportReport> &export_report, const
 #endif
 	}
 	return _ret_err;
+}
+#include "compat/texture_loader_compat.h"
+
+Error TextureExporter::recreate_missing_variants(const String &output_dir, Ref<ImportInfo> import_infos) const {
+	// Recreates textures that were not exported in the PCK, but are still present in the import info.
+	// The purpose of this is to prevent a re-import upon load due to the md5 check failing.
+	String importer = import_infos->get_importer();
+	if ((importer != "texture" && importer != "texture_2d") || import_infos->get_ver_major() != 3) {
+		return ERR_UNAVAILABLE;
+	}
+
+	auto dest_files = import_infos->get_dest_files();
+	Vector<String> to_recreate;
+	for (auto &E : dest_files) {
+		auto path = output_dir.path_join(E.trim_prefix("res://"));
+		if (!FileAccess::exists(path)) {
+			to_recreate.push_back(E);
+		}
+	}
+	if (to_recreate.size() == 0) {
+		return OK;
+	}
+	String path;
+	ERR_FAIL_COND_V_MSG(get_extant_texture_path(import_infos, path) != OK, ERR_FILE_NOT_FOUND, "No existing textures found for this import");
+	Ref<Texture2D> texture = ResourceCompatLoader::non_global_load(path);
+	ERR_FAIL_COND_V_MSG(texture.is_null(), ERR_FILE_NOT_FOUND, "Failed to load texture " + path);
+	Ref<Image> image = texture->get_image();
+	ERR_FAIL_COND_V_MSG(image.is_null(), ERR_FILE_NOT_FOUND, "Failed to load image for texture " + path);
+	Ref<ResourceInfo> info = ResourceInfo::get_info_from_resource(texture);
+	ERR_FAIL_COND_V_MSG(info.is_null(), ERR_FILE_NOT_FOUND, "Failed to get resource info for texture " + path);
+	Dictionary extra = info->get_extra();
+	uint32_t texture_flags = extra["texture_flags"];
+	uint32_t data_format = extra["data_format"];
+
+	Dictionary params = import_infos->get_params();
+	int normal = int(params.get("compress/normal_map", 0));
+	bool force_rgbe = bool(params.get("compress/hdr_mode", false));
+	bool force_normal = normal == 1;
+
+	for (auto &E : to_recreate) {
+		String format = E.get_basename().get_extension();
+		Image::CompressMode compress_mode = Image::CompressMode::COMPRESS_S3TC;
+		if (format == "s3tc") {
+			compress_mode = Image::CompressMode::COMPRESS_S3TC;
+		} else if (format == "etc2") {
+			compress_mode = Image::CompressMode::COMPRESS_ETC2;
+		} else if (format == "astc") {
+			compress_mode = Image::CompressMode::COMPRESS_ASTC;
+		} else {
+			ERR_CONTINUE_MSG(true, "Unsupported format: " + format);
+		}
+		auto output_path = output_dir.path_join(E.trim_prefix("res://"));
+		Error err = TextureLoaderCompat::save_image_to_stex_v3(image, output_path, COMPRESS_VRAM_COMPRESSED, compress_mode, texture_flags, data_format, force_rgbe, force_normal);
+		ERR_CONTINUE_MSG(err != OK, "Failed to save image to stex: " + E);
+	}
+	return OK;
 }

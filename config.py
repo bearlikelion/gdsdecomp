@@ -2,10 +2,20 @@ def can_build(env, platform):
     return True
 
 
-import methods
 import os
 import sys
 import shutil
+
+def _apply_core_patches(env):
+    import importlib.util
+
+    patches_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build", "patches.py")
+    spec = importlib.util.spec_from_file_location("gdsdecomp_build_patches", patches_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"gdsdecomp: failed to load patches module from {patches_path}")
+    patches_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(patches_module)
+    patches_module.apply_core_patches(env)
 
 
 # A terrible hack to force-enable our dependent modules being included on non-editor builds.
@@ -21,6 +31,8 @@ import shutil
 # sort_module_list is called right after after env.module_list is set with all the modules,
 # so we can monkey patch that to add the modules we need.
 def monkey_patch_sort_module_list():
+    import methods  # pyright: ignore[reportMissingImports]
+
     old_sort_module_list = methods.sort_module_list
 
     def sort_module_list(env):
@@ -38,57 +50,45 @@ def monkey_patch_sort_module_list():
     methods.sort_module_list = sort_module_list
 
 
-# A hack to have "generate_bundle" copy the library to the frameworks dir in the bundle
-def monkey_patch_macos_generate_bundle():
-    # get the current directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    platform_macos_builders_dir = os.path.abspath(os.path.join(current_dir, "../../platform/macos"))
-    sys.path.insert(0, platform_macos_builders_dir)
-    import platform_macos_builders
-
-    old_generate_bundle = platform_macos_builders.generate_bundle
-
-    def generate_bundle(target, source, env):
-        if "disable_godot_mono_decomp" in env and env["disable_godot_mono_decomp"]:
-            old_generate_bundle(target, source, env)
-            return
-        frameworks_dir = ""
-        if env.editor_build:
-            templ = env.Dir("#misc/dist/macos_tools.app").abspath
-            frameworks_dir = os.path.join(templ, "Contents/Frameworks")
-        else:
-            templ = env.Dir("#misc/dist/macos_template.app").abspath
-            frameworks_dir = os.path.join(templ, "Contents/Frameworks")
-        remove_fw_dir = False
-        if not os.path.isdir(frameworks_dir):
-            remove_fw_dir = True
-            os.mkdir(frameworks_dir)
-        # Copy frameworks
-        monolib = env.Dir("#bin").abspath + "/libGodotMonoDecompNativeAOT.dylib"
-        shutil.copy(monolib, frameworks_dir + "/libGodotMonoDecompNativeAOT.dylib")
-        # run the original generate_bundle
-        old_generate_bundle(target, source, env)
-        # remove the library from the frameworks dir
-        os.remove(frameworks_dir + "/libGodotMonoDecompNativeAOT.dylib")
-        if remove_fw_dir:
-            os.rmdir(frameworks_dir)
-
-    platform_macos_builders.generate_bundle = generate_bundle
-
-    # remove the platform_macos_builders from the path
-    sys.path.remove(platform_macos_builders_dir)
-
 def configure(env):
+    _apply_core_patches(env)
     if not env.editor_build:
         monkey_patch_sort_module_list()
-    if env["platform"] == "macos":
-        monkey_patch_macos_generate_bundle()
+    if not "use_static_godot_mono_decomp" in env:
+        env["use_static_godot_mono_decomp"] = False
+
+    if env["use_static_godot_mono_decomp"] and (env["platform"] == "android" or env["platform"] == "macos"):
+        print(f"Using shared Mono for {env['platform']} because static Mono is not supported for this platform")
+        env["use_static_godot_mono_decomp"] = False
+
+    # hack to force the minimum macOS version to 10.15; it is currently hard-coded to 10.13
+    # TODO: remove this hack once the minimum macOS version is updated to 10.15
+    if env["platform"] == "macos" and env["arch"] == "x86_64":
+        min_version_flag = "-mmacosx-version-min=10.15"
+        env.Append(CPPFLAGS=[min_version_flag])
+        env.Append(LINKFLAGS=[min_version_flag])
+        env.Append(CXXFLAGS=[min_version_flag])
+        env.Append(ASFLAGS=[min_version_flag])
+
+
+def get_opts(platform):
+    from SCons.Variables import BoolVariable
+
+    opts = [
+        BoolVariable("disable_godot_mono_decomp", "Disable Godot Mono Decompilation", False),
+        BoolVariable("disable_gifski", "Disable Gifski", False),
+        BoolVariable("ignore_godot_branch_check", "Ignore Godot branch check", False),
+    ]
+    if not (platform == "android" or platform == "macos"):
+        opts.append(BoolVariable("use_static_godot_mono_decomp", "Build Godot Mono Decomp library as static", False))
+    return opts
 
 
 def get_doc_classes():
     return [
         "GDScriptDecomp",
         "Glob",
+        "SemVer",
         "GodotVer",
         "GodotREEditorStandalone",
         "ImportExporter",

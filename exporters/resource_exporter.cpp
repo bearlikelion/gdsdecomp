@@ -92,6 +92,16 @@ Error ResourceExporter::test_export(const Ref<ExportReport> &export_report, cons
 	return ERR_UNAVAILABLE;
 }
 
+void ResourceExporter::prebatch_export() {
+}
+
+void ResourceExporter::postbatch_export() {
+}
+
+Error ResourceExporter::recreate_missing_variants(const String &output_dir, Ref<ImportInfo> import_infos) const {
+	return ERR_UNAVAILABLE;
+}
+
 void ResourceExporter::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_name"), &ResourceExporter::get_name);
 	ClassDB::bind_method(D_METHOD("supports_nonpack_export"), &ResourceExporter::supports_nonpack_export);
@@ -179,7 +189,19 @@ Ref<ExportReport> Exporter::export_resource(const String &output_dir, Ref<Import
 		report->set_error(ERR_UNAVAILABLE);
 		return report;
 	}
-	return exporter->export_resource(output_dir, import_infos);
+	auto report = exporter->export_resource(output_dir, import_infos);
+	if (report.is_valid() && report->get_exporter().is_empty()) {
+		report->set_exporter(exporter->get_name());
+	}
+	return report;
+}
+
+Error Exporter::recreate_missing_variants(const String &output_dir, Ref<ImportInfo> import_infos) {
+	auto exporter = get_exporter(import_infos->get_importer(), import_infos->get_type());
+	if (exporter.is_null()) {
+		return ERR_UNAVAILABLE;
+	}
+	return exporter->recreate_missing_variants(output_dir, import_infos);
 }
 
 Error Exporter::export_file(const String &out_path, const String &res_path) {

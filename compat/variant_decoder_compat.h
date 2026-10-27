@@ -106,11 +106,13 @@ public:
 	static int variant_type_enum_v4_to_v3(Variant::Type type);
 	static int convert_variant_type_to_old(Variant::Type type, int ver_major);
 
+	static Error decode_variant_4(Variant &r_variant, const uint8_t *p_buffer, int p_len, int *r_len = nullptr, bool p_allow_objects = false, int p_depth = 0);
 	static Error decode_variant_3(Variant &r_variant, const uint8_t *p_buffer, int p_len, int *r_len = nullptr, bool p_allow_objects = false);
 	static Error decode_variant_2(Variant &r_variant, const uint8_t *p_buffer, int p_len, int *r_len = nullptr, bool p_allow_objects = false);
 	static Error decode_variant_compat(int ver_major, Variant &r_variant, const uint8_t *p_buffer, int p_len, int *r_len = nullptr, bool p_allow_objects = false);
 
+	static Error encode_variant_4(const Variant &p_variant, uint8_t *r_buffer, int &r_len, bool p_allow_objects = false, bool p_real_t_is_double = false, int p_depth = 0);
 	static Error encode_variant_3(const Variant &p_variant, uint8_t *r_buffer, int &r_len, bool p_full_objects = false, int p_depth = 0);
 	static Error encode_variant_2(const Variant &p_variant, uint8_t *r_buffer, int &r_len);
-	static Error encode_variant_compat(int ver_major, const Variant &p_variant, uint8_t *r_buffer, int &r_len, bool p_full_objects = false, int p_depth = 0);
+	static Error encode_variant_compat(int ver_major, const Variant &p_variant, uint8_t *r_buffer, int &r_len, bool p_full_objects = false, bool p_real_t_is_double = false, int p_depth = 0);
 };

@@ -12,8 +12,6 @@ var editor_message_default_text: String = ""
 var log_file_default_text: String = ""
 var recovery_folder: String = ""
 
-# var isHiDPI = DisplayServer.screen_get_dpi() >= 240
-var isHiDPI = false
 var root: TreeItem = null
 var userroot: TreeItem = null
 var num_files:int = 0
@@ -48,12 +46,6 @@ func _ready():
 	editor_message_default_text = EDITOR_MESSAGE_LABEL.text
 	log_file_default_text = LOG_FILE_LABEL.text
 
-	if isHiDPI:
-		# get_viewport().size *= 2.0
-		# get_viewport().content_scale_factor = 2.0
-		#ThemeDB.fallback_base_scale = 2.0
-		self.content_scale_factor = 2.0
-		self.size *= 2.0
 	# This is a hack to get around not being able to open multiple scenes
 	# unless they're attached to windows
 	# The children are not already in the window for ease of GUI creation
@@ -98,7 +90,11 @@ func add_ver_string(ver_string: String):
 	elif report.is_mono_detected():
 		ver_string += " (Mono)"
 	var custom_version_note := ""
-	if report.is_custom_version_detected():
+	if report.is_using_double_precision():
+		custom_version_note = ("[b]This Project requires a Godot engine built with double precision.[/b]\n" +
+								"You must build the engine with `precision=double` flag to edit this project.\n" +
+								"[url=https://docs.godotengine.org/en/stable/engine_details/development/compiling/index.html]See the Godot documentation[/url] for more information.\n")
+	elif report.is_custom_version_detected():
 		custom_version_note = "[b]Custom Godot engine version detected!\nYou may encounter errors when opening the project in the editor.[/b]\n" + custom_version_note
 	EDITOR_MESSAGE_LABEL.text = EDITOR_MESSAGE_LABEL.text.replace("<GODOT_VER>", "[url=" + get_url_for_tag(tag, report.is_steam_detected()) + "]"+ ver_string + "[/url]")
 	EDITOR_MESSAGE_LABEL.text = EDITOR_MESSAGE_LABEL.text.replace("<CUSTOM_VER_NOTE>", custom_version_note)

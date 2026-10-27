@@ -14,12 +14,13 @@ class GitHubSource : public PluginSource {
 private:
 	static constexpr const char *_github_release_api_url = "https://api.github.com/repos/{0}/{1}/releases?per_page=100&page={2}";
 	static const String github_release_api_url;
-	virtual const HashMap<String, String> &get_plugin_repo_map();
+	virtual const HashMap<String, Vector<String>> &get_plugin_repo_map();
 	virtual const HashMap<String, Vector<String>> &get_plugin_tag_masks();
 	virtual const HashMap<String, Vector<String>> &get_plugin_release_file_masks();
 	virtual const HashMap<String, Vector<String>> &get_plugin_release_file_exclude_masks();
 	virtual const String &get_release_api_url();
 	virtual int get_release_page_limit();
+	virtual Error make_request(const String &url, const Vector<String> &extra_headers, Vector<uint8_t> &response);
 
 protected:
 	struct GHReleaseCache {
@@ -69,7 +70,7 @@ protected:
 
 	bool should_skip_tag(const String &plugin_name, const String &tag);
 	bool should_skip_release(const String &plugin_name, const String &release);
-	String get_repo_url(const String &plugin_name);
+	Vector<String> get_repo_urls(const String &plugin_name);
 
 	Vector<Dictionary> get_list_of_releases(const String &plugin_name, Error &r_error);
 
@@ -93,6 +94,6 @@ public:
 	void save_cache() override;
 	bool handles_plugin(const String &plugin_name) override;
 	bool is_default() override { return false; }
-	// void load_cache_data(const String &plugin_name, const Dictionary &data) override; // Deprecated
 	Vector<ReleaseInfo> find_release_infos_by_tag(const String &plugin_name, const String &tag, Error &r_error) override;
+	void clear_cache() override;
 };

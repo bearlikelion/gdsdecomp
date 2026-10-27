@@ -43,7 +43,6 @@ public:
 	virtual StringName get_instance_base_type() const override;
 	virtual ScriptInstance *instance_create(Object *p_this) override;
 	virtual PlaceHolderScriptInstance *placeholder_instance_create(Object *p_this) override;
-	virtual bool instance_has(const Object *p_this) const override;
 
 	virtual bool has_source_code() const override;
 	virtual String get_source_code() const override;
@@ -190,5 +189,7 @@ public:
 	virtual const Variant get_rpc_config() const override;
 
 	virtual ScriptLanguage *get_language() override;
+
+	void force_set_property(const StringName &p_name, const Variant &p_value);
 	virtual ~FakeScriptInstance();
 };

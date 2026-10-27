@@ -19,6 +19,14 @@ struct EditCache {
 	static EditCache from_json(const Dictionary &json);
 };
 
+struct SearchCache {
+	double retrieved_time = 0;
+	String search_query;
+	Vector<Dictionary> results;
+	Dictionary to_json() const;
+	static SearchCache from_json(const Dictionary &json);
+};
+
 class AssetLibrarySource : public PluginSource {
 	GDCLASS(AssetLibrarySource, PluginSource)
 
@@ -27,6 +35,7 @@ private:
 
 	HashMap<int64_t, EditListCache> edit_list_cache;
 	HashMap<int64_t, EditCache> edit_cache;
+	HashMap<String, SearchCache> search_cache;
 
 	// Helper methods
 	Error get_edit_list(int64_t asset_id, Vector<Dictionary> &r_edits);
@@ -37,8 +46,10 @@ private:
 	Error get_valid_edit_ids_for_plugin(int64_t asset_id, Vector<int64_t> &r_versions);
 	Error load_edit_list_cache();
 	void load_edit_cache();
+	void load_search_cache();
 	void save_edit_list_cache();
 	void save_edit_cache();
+	void save_search_cache();
 
 public:
 	// Implementation of PluginSource interface
@@ -50,4 +61,5 @@ public:
 	bool is_default() override { return true; }
 	String get_plugin_name() override;
 	Vector<ReleaseInfo> find_release_infos_by_tag(const String &plugin_name, const String &tag, Error &r_error) override;
+	void clear_cache() override;
 };

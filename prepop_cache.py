@@ -35,7 +35,8 @@ PLUGINS_TO_PREPOP = [
     "godotsteam_server",
     "spine_godot_extension",
     "sentry",
-    "wwise"
+    "wwise",
+    "audio_gate",
 ]
 
 
@@ -51,6 +52,9 @@ GITLAB_PRECACHE_DIR = os.path.join(TEMP_CACHE_DIR, "gitlab")
 HEADER_SRC_PATH: str = os.path.join(CURRENT_DIR, "misc", "static_plugin_cache.h.inc")
 HEADER_DST_PATH: str = os.path.join(CURRENT_DIR, "utility", "static_plugin_cache.h")
 
+IGNORE_SIZE_CHECK = os.getenv("IGNORE_SIZE_CHECK", "0") != "0"
+
+JSON_TMP_PATH: str = os.path.join(TEMP_CACHE_DIR, "gdre_static_plugin_cache.tmp.json")
 JSON_DST_PATH: str = os.path.join(STANDALONE_DIR, "gdre_static_plugin_cache.json")
 
 ASSET_LIB_PRECACHE_HEADER_START = "// __ASSET_LIB_PRECACHE__"
@@ -76,6 +80,9 @@ def get_godot_arch():
     else:
         raise ValueError(f"Unsupported architecture: {platform.machine()}")
 
+CLEAR_ALL = os.getenv("CLEAR_ALL", "0") != "0"
+CLEAR_CACHE = os.getenv("CLEAR_CACHE", "0") != "0"
+CLEAR_DOWNLOAD_CACHE = os.getenv("CLEAR_DOWNLOAD_CACHE", "0") != "0"
 DEV_MODE = os.getenv("DEV_MODE", "0") != "0"
 GODOT_EXE = os.path.join(BIN_DIR, f"godot.{get_godot_platform()}.editor.{('dev.' if DEV_MODE else '')}{get_godot_arch()}")
 ARGS = [GODOT_EXE, "--headless", "--path", STANDALONE_DIR]
@@ -109,54 +116,29 @@ def generate_header_file():
         f.write(header_src)
 
 
-def generate_json_file():
+def check_and_save_json_file():
+    new_json_dicts: dict[str, dict[str, object]] = json.load(open(JSON_TMP_PATH))
+    old_json_dicts: dict[str, dict[str, object]] = {}
+    if os.path.exists(JSON_DST_PATH):
+        old_json_dicts = json.load(open(JSON_DST_PATH))
+    else:
+        print(f"Old static cache missing!")
+        save_json_file(new_json_dicts, JSON_DST_PATH)
+        return 0
+    if len(new_json_dicts) < len(old_json_dicts):
+        if not IGNORE_SIZE_CHECK:
+            print(f"New JSON file has less entries than the old one: {len(new_json_dicts)} < {len(old_json_dicts)}")
+            return 1
+        else:
+            print(f"New JSON file has less entries than the old one: {len(new_json_dicts)} < {len(old_json_dicts)}, ignoring size check")
+    # remove the old one and save the new one
+    os.remove(JSON_DST_PATH)
+    save_json_file(new_json_dicts, JSON_DST_PATH)
+    return 0
 
-    jsons = get_json_dicts_from_dir(os.path.join(TEMP_CACHE_DIR, "plugin_versions"))
-    main_dict = {}
-    # github_base64s = get_json_dicts_from_dir(GITHUB_PRECACHE_DIR)
-    # gitlab_base64s = get_json_dicts_from_dir(GITLAB_PRECACHE_DIR)
-    # asset_lib_base64s = [(get_asset_lib_plugin_name(file_path), base64) for file_path, base64 in asset_lib_base64s]
-    # github_base64s = [(get_plugin_name_from_file(file_path), base64) for file_path, base64 in github_base64s]
-    # gitlab_base64s = [(get_plugin_name_from_file(file_path), base64) for file_path, base64 in gitlab_base64s]
-    # asset_lib_base64_dict = {plugin_name: base64 for plugin_name, base64 in asset_lib_base64s}
-    # github_base64_dict = {plugin_name: base64 for plugin_name, base64 in github_base64s}
-    # gitlab_base64_dict = {plugin_name: base64 for plugin_name, base64 in gitlab_base64s}
-    # main_dict = {
-    #     "asset_lib": asset_lib_base64_dict,
-    #     "github": github_base64_dict,
-    #     "gitlab": gitlab_base64_dict
-    # }
-    previous_file_size = 0
-    for _, blob in jsons:
-        for _, json_dict in blob.items():
-            release_info = json_dict["release_info"]
-            key = (
-                release_info["plugin_source"]
-                + "-"
-                + str(release_info["primary_id"])
-                + "-"
-                + str(release_info["secondary_id"])
-            )
-            main_dict[key] = json_dict
-    # sort dict
-    main_dict = dict(sorted(main_dict.items()))
-    dest_path = JSON_DST_PATH
-    already_exists = os.path.exists(JSON_DST_PATH)
-    if already_exists:
-        # check the file_size
-        previous_file_size = os.path.getsize(JSON_DST_PATH)
-        dest_path = JSON_DST_PATH + ".tmp"
+def save_json_file(json_dicts: dict[str, dict[str, object]], dest_path: str):
     with open(dest_path, "w") as f:
-        json.dump(main_dict, f)
-    # if os.path.getsize(dest_path) < previous_file_size:
-    #     print("File size decreased, aborting")
-    #     # remove the tmp file
-    #     os.remove(dest_path)
-    #     sys.exit(1)
-    if already_exists:
-        # rename the tmp file to the original file
-        os.rename(dest_path, JSON_DST_PATH)
-
+        json.dump(json_dicts, f, indent=0)
 
 def prepop_cache():
     if not os.path.exists(GODOT_EXE):
@@ -166,8 +148,17 @@ def prepop_cache():
     # set the environment variable
     os.environ[CACHE_DIR_ENV_VAR] = TEMP_CACHE_DIR
     args: list[str] = ARGS.copy()
+    if CLEAR_ALL:
+        args.append("--clear-plugin-cache-including-static")
+        args.append("--clear-download-cache")
+    else:
+        if CLEAR_CACHE:
+            args.append("--clear-plugin-cache-including-static")
+        if CLEAR_DOWNLOAD_CACHE:
+            args.append("--clear-download-cache")
     for plugin in PLUGINS_TO_PREPOP:
         args.append(f"--plcache={plugin}")
+    args.append(f"--output={JSON_TMP_PATH}")
     subprocess.run(args)
 
 
@@ -198,4 +189,5 @@ def get_base64_from_file(file_path: str) -> str:
 
 if __name__ == "__main__":
     prepop_cache()
-    generate_json_file()
+    exit_code = check_and_save_json_file()
+    sys.exit(exit_code)

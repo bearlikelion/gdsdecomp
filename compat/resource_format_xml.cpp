@@ -2312,7 +2312,7 @@ void ResourceFormatSaverXMLInstance::write_property(const String &p_name, const 
 				break;
 			}
 
-			if (external_resources.has(res)) {
+			if (external_resources.has(res) && ver_major > 1) { // v2.0 and above had indexed external resources
 				params = "external=\"" + itos(external_resources[res]) + "\"";
 			} else {
 				params = "resource_type=\"" + res->get_save_class() + "\"";
@@ -2572,7 +2572,10 @@ void ResourceFormatSaverXMLInstance::write_property(const String &p_name, const 
 
 			auto keys = dict.get_key_list();
 
-			keys.sort();
+			// v1.1 and above sorted dicts before writing, v1.0 and below did not
+			if (ver_major > 1 || (ver_major == 1 && ver_minor >= 1)) {
+				keys.sort();
+			}
 
 			for (auto &key : keys) {
 				//if (!_check_type(dict[E->get()]))
@@ -2847,7 +2850,11 @@ Error ResourceFormatSaverXMLInstance::save_to_file(const Ref<FileAccess> &p_f, c
 		write_tabs();
 		String p = E.key->get_path();
 
-		enter_tag("ext_resource", "path=\"" + p + "\" type=\"" + E.key->get_save_class() + "\" index=\"" + itos(E.value) + "\""); //bundled
+		String args = "path=\"" + p + "\" type=\"" + E.key->get_save_class() + "\"";
+		if (ver_major > 1) {
+			args += " index=\"" + itos(E.value) + "\"";
+		}
+		enter_tag("ext_resource", args); //bundled
 		exit_tag("ext_resource"); //bundled
 		write_string("\n", false);
 	}
@@ -2958,6 +2965,12 @@ Error ResourceFormatSaverXMLInstance::save_to_file(const Ref<FileAccess> &p_f, c
 Error ResourceFormatSaverXML::save(const Ref<Resource> &p_resource, const String &p_path, uint32_t p_flags) {
 	ResourceFormatSaverXMLInstance saver;
 	return saver.save(p_path, p_resource, p_flags);
+}
+
+Error ResourceFormatSaverXML::save_custom(const Ref<Resource> &p_resource, const String &p_path, int ver_format, int ver_major, int ver_minor, uint32_t p_flags) {
+	ERR_FAIL_COND_V_MSG(ver_format < 0 || ver_major < 0, ERR_INVALID_PARAMETER, "Invalid version info");
+	p_flags = CompatFormatLoader::set_version_info_in_flags(p_flags, 0, ver_major, ver_minor);
+	return save(p_resource, p_path, p_flags);
 }
 
 bool ResourceFormatSaverXML::recognize(const Ref<Resource> &p_resource) const {

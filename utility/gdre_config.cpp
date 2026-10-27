@@ -5,9 +5,12 @@
 #include "core/io/config_file.h"
 #include "core/io/json.h"
 #include "core/object/class_db.h"
+#include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
+#include "core/variant/variant_utility.h"
 #include "gdre_logger.h"
 #include "gdre_settings.h"
+#include "gdre_version.gen.h"
 #include "godot_mono_decomp_wrapper.h"
 
 GDREConfig *GDREConfig::singleton = nullptr;
@@ -205,8 +208,15 @@ public:
 	virtual bool is_dirpicker() const override { return true; }
 };
 
-Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
-	return {
+HashMap<String, Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
+	Vector<Ref<GDREConfigSetting>> settings = {
+		memnew(GDREConfigSetting(
+				"last_gdre_version_used",
+				"Last GDRE version used",
+				"",
+				"",
+				true,
+				false)),
 		memnew(GDREConfigSetting(
 				"download_plugins",
 				"Download plugins",
@@ -248,6 +258,11 @@ Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
 				"<NONE>",
 				true)),
 		memnew(GDREConfigSetting(
+				"execute_visual_shader_node_scripts",
+				"Execute VisualShaderNodeCustom scripts",
+				"Execute VisualShaderNodeCustom scripts when loading visual shaders.\nSetting this to `true` can fix errors occurring when exporting scenes that contain VisualShaders.\n\nWARNING: As this executes arbitrary code, this should be considered unsafe.\nEnsure that you trust the source code in this project before enabling this.",
+				false)),
+		memnew(GDREConfigSetting(
 				"Preview/use_scene_view_by_default",
 				"Use scene view by default",
 				"Use scene view by default instead of the text preview.\nWARNING: Scene view is still experimental and certain scenes may cause the program to become unresponsive.",
@@ -267,6 +282,22 @@ Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
 				"Recovery/git/add_imports_to_git_repo",
 				"Add imports to git repo",
 				"Add .godot/imported/ (or .import/ for Godot 3) to the git repo.",
+				false)),
+		memnew(GDREConfigSettingEnum(
+				"Script/Indent/type",
+				"Indent type",
+				"The type of indentation to use when decompiling and displaying scripts.",
+				0,
+				"Tabs,Spaces",
+				false,
+				false)),
+		memnew(GDREConfigSettingRange(
+				"Script/Indent/size",
+				"Tab size",
+				"The number of spaces to use when decompiling and displaying scripts.",
+				4,
+				"1,64,1",
+				false,
 				false)),
 		memnew(GDREConfigSetting_BytecodeForceBytecodeRevision()),
 		memnew(GDREConfigSetting_LoadCustomBytecode()),
@@ -291,7 +322,35 @@ Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
 				"Create additional projects for project references",
 				"If a project reference is detected, create an additional project and add it to the solution.",
 				true)),
+		memnew(GDREConfigSetting(
+				"CSharp/remove_generated_json_context_body",
+				"Remove generated Json context body",
+				"Remove the body of generated JsonSourceGeneration context classes.",
+				false)),
+		memnew(GDREConfigSetting(
+				"CSharp/enable_collection_initializer_lifting",
+				"Enable collection initializer lifting",
+				"Enable the LiftCollectionInitializers transform.\nIf disabled, the legacy RemoveBogusBaseConstructorCalls transform is used.",
+				true)),
+		memnew(GDREConfigSetting(
+				"CSharp/emit_il_annotation_comments",
+				"Emit IL annotation comments",
+				"Emit ILInstruction annotations as comments for statement/expression nodes.\nIntended for debug verification of annotation propagation.",
+				false)),
 		memnew(GDREConfigSetting_CSharpForceLanguageVersion()),
+		memnew(GDREConfigSetting(
+				"CSharp/automatically_search_workshop_dependencies",
+				"Automatically find search paths for Steam workshop modules",
+				"Automatically find additional assembly search paths for Steam workshop modules.",
+				true,
+				false)),
+		memnew(GDREConfigSetting(
+				"CSharp/additional_assembly_search_paths",
+				"Additional assembly search paths",
+				"Additional assembly search paths to use for resolving assembly references.\nThis is useful for resolving assembly references in Steam workshop modules that rely on additional assemblies.",
+				Vector<String>(),
+				false,
+				false)),
 		memnew(GDREConfigSetting(
 				"CSharp/compile_after_decompile",
 				"Compile after decompile",
@@ -324,7 +383,7 @@ Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
 		memnew(GDREConfigSetting(
 				"Exporter/Scene/GLTF/force_require_KHR_node_visibility",
 				"Force require KHR_node_visibility extension",
-				"By default, the exporter will only require the KHR_node_visibility extension if the scenes are from Godot 4.5 or later.\nThis setting forces the exporter to require the extension regardless of engine version.",
+				"By default, the exporter will only set KHR_node_visibility as an optional extension.\nThis setting forces the exporter to require the extension regardless of engine version.",
 				false)),
 		memnew(GDREConfigSetting(
 				"Exporter/Scene/GLTF/ignore_missing_dependencies",
@@ -342,6 +401,12 @@ Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
 				"Replaces shader materials with generated standard materials when exporting the scene.\nSolves issues with exported scenes not having any textures.\nWARNING: This is experimental and may result in inaccurate exports.",
 				false)),
 		memnew(GDREConfigSetting(
+				"Exporter/Scene/GLTF/debug_copies",
+				"Create debug copies",
+				"For development.",
+				false,
+				true)),
+		memnew(GDREConfigSetting(
 				"Exporter/Texture/create_lossless_copy",
 				"Create lossless copy",
 				"Create a lossless .png copy of exported textures in '<OUTPUT_DIR>/.assets' if the texture is stored in a lossy format (e.g. jpeg)",
@@ -351,11 +416,17 @@ Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
 				"Disable translation key recovery",
 				"Disable translation key recovery.\nThis will skip the translation key recovery process entirely.",
 				false)),
-		memnew(GDREConfigSetting(
+		memnew(GDREConfigSettingEnum(
+				// Name unchanged for backwards compatibility (bool `true` -> `1` == `Very Thorough`)
 				"Exporter/Translation/more_thorough_recovery",
-				"More thorough translation key recovery",
-				"Enable more thorough translation key recovery.\nWARNING: this is not guaranteed to find all the keys in the translation file and may massively increase the time it takes to run.",
-				false)),
+				"Key recovery mode",
+				"Sets the key recovery mode.\n"
+				"* Default: Balanced, runs most stages of key recovery with reduced working set size\n"
+				"* Very Thorough: runs all stages of key recovery with full working set size\n"
+				"    WARNING: this is not guaranteed to find all the keys in the translation file and may massively increase the time it takes to run.\n"
+				"* Only resource strings: Only runs first stage of key recovery, fastest option",
+				0,
+				"Default,Very Thorough,Only resource strings")),
 		memnew(GDREConfigSetting_TranslationExporter_LoadKeyHintFile()),
 		memnew(GDREConfigSetting(
 				"Exporter/Translation/skip_loading_resource_strings",
@@ -372,6 +443,11 @@ Vector<Ref<GDREConfigSetting>> GDREConfig::_init_default_settings() {
 				false,
 				true)),
 	};
+	HashMap<String, Ref<GDREConfigSetting>> default_settings;
+	for (const auto &setting : settings) {
+		default_settings[setting->full_name] = setting;
+	}
+	return default_settings;
 }
 
 // static const HashMap<String, String> deprecated_setting_mappings = {
@@ -393,13 +469,20 @@ GDREConfig::~GDREConfig() {
 }
 
 TypedArray<GDREConfigSetting> GDREConfig::get_all_settings() const {
-	return gdre::vector_to_typed_array(default_settings);
+	TypedArray<GDREConfigSetting> settings;
+	settings.resize(default_settings.size());
+	int i = 0;
+	for (const auto &[key, setting] : default_settings) {
+		settings.set(i, setting);
+		i++;
+	}
+	return settings;
 }
 
 void GDREConfig::load_config() {
 	settings.clear();
 
-	for (const auto &setting : default_settings) {
+	for (const auto &[key, setting] : default_settings) {
 		if (setting->is_virtual_setting()) {
 			continue;
 		}
@@ -428,9 +511,17 @@ String GDREConfig::get_config_path() {
 void GDREConfig::save_config() {
 	auto cfg_path = get_config_path();
 	Ref<ConfigFile> config = memnew(ConfigFile);
-	for (const auto &[key, value] : settings) {
-		config->set_value(get_section_from_key(key), get_name_from_key(key), value);
+	for (const auto &[key, p_value] : settings) {
+		String name = get_name_from_key(key);
+		Variant value = p_value;
+		if (default_settings.has(key) && default_settings[key]->get_type() != Variant::Type::NIL) {
+			value = VariantUtilityFunctions::type_convert(p_value, default_settings[key]->get_type());
+		}
+		if (!default_settings.has(key) || get_default_value(key) != value) {
+			config->set_value(get_section_from_key(key), name, value);
+		}
 	}
+	config->set_value("General", "last_gdre_version_used", GDRE_VERSION);
 	gdre::ensure_dir(cfg_path.get_base_dir());
 	Error err = config->save(cfg_path);
 	if (err != OK) {
@@ -439,18 +530,23 @@ void GDREConfig::save_config() {
 }
 
 String get_full_name(const String &p_setting) {
-	if (!p_setting.contains("/")) {
+	if (!p_setting.contains_char('/')) {
 		return "General/" + p_setting;
 	}
 	return p_setting;
 }
 
 void GDREConfig::set_setting(const String &p_setting, const Variant &p_value, bool p_force_ephemeral) {
-	if (p_force_ephemeral || ephemeral_settings.contains(get_full_name(p_setting))) {
-		ephemeral_settings.try_emplace_l(get_full_name(p_setting), [=](auto &v) { v.second = p_value; }, p_value);
+	String full_name = get_full_name(p_setting);
+	Variant value = p_value;
+	if (default_settings.has(full_name) && default_settings[full_name]->get_type() != Variant::Type::NIL) {
+		value = VariantUtilityFunctions::type_convert(p_value, default_settings[full_name]->get_type());
+	}
+	if (p_force_ephemeral || ephemeral_settings.contains(full_name)) {
+		ephemeral_settings.try_emplace_l(full_name, [=](auto &v) { v.second = value; }, value);
 		return;
 	}
-	settings.try_emplace_l(get_full_name(p_setting), [=](auto &v) { v.second = p_value; }, p_value);
+	settings.try_emplace_l(full_name, [=](auto &v) { v.second = value; }, value);
 }
 
 bool GDREConfig::has_setting(const String &p_setting) const {
@@ -467,11 +563,10 @@ Variant GDREConfig::get_setting(const String &p_setting, const Variant &p_defaul
 }
 
 String GDREConfig::get_section_from_key(const String &p_setting) {
-	auto parts = p_setting.split("/", true, 1);
-	if (parts.size() == 1) {
+	if (!p_setting.contains_char('/')) {
 		return "General";
 	}
-	return parts[0];
+	return p_setting.get_slice("/", 0);
 }
 
 String GDREConfig::get_name_from_key(const String &p_setting) {
@@ -484,17 +579,15 @@ String GDREConfig::get_name_from_key(const String &p_setting) {
 
 Variant GDREConfig::get_default_value(const String &p_setting) const {
 	String full_name = get_full_name(p_setting);
-	for (const auto &setting : default_settings) {
-		if (setting->get_full_name() == full_name) {
-			return setting->get_default_value();
-		}
+	if (default_settings.has(full_name)) {
+		return default_settings[full_name]->get_default_value();
 	}
 	return Variant();
 }
 
 void GDREConfig::reset_ephemeral_settings() {
 	ephemeral_settings.clear();
-	for (const auto &setting : default_settings) {
+	for (const auto &[key, setting] : default_settings) {
 		if (setting->is_ephemeral()) {
 			Variant default_value = setting->get_default_value();
 			settings.if_contains(setting->get_full_name(), [&](const auto &v) { default_value = v.second; });
@@ -551,12 +644,113 @@ void GDREConfigSetting::set_value(const Variant &p_value, bool p_force_ephemeral
 	GDREConfig::get_singleton()->set_setting(full_name, p_value, p_force_ephemeral || ephemeral);
 }
 
+Variant GDREConfigSetting::get_min_value() const {
+	switch (get_type()) {
+		case Variant::Type::INT:
+			return 0;
+		case Variant::Type::FLOAT:
+			return 0.0f;
+		case Variant::Type::BOOL:
+			return false;
+		default:
+			return Variant();
+	}
+}
+
+Variant GDREConfigSetting::get_max_value() const {
+	switch (get_type()) {
+		case Variant::Type::INT:
+			return INT_MAX;
+		case Variant::Type::FLOAT:
+			return 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0;
+		case Variant::Type::BOOL:
+			return true;
+		default:
+			return Variant();
+	}
+}
+
+Variant GDREConfigSetting::get_step_value() const {
+	switch (get_type()) {
+		case Variant::Type::INT:
+			return 1;
+		case Variant::Type::FLOAT:
+			return 0.01f;
+		case Variant::Type::BOOL:
+			return 1;
+		default:
+			return Variant();
+	}
+}
+
 bool GDREConfigSetting::is_hidden() const {
 	return hidden;
 }
 
 bool GDREConfigSetting::is_ephemeral() const {
 	return ephemeral;
+}
+
+GDREConfigSettingEnum::GDREConfigSettingEnum(
+		const String &p_full_name,
+		const String &p_brief,
+		const String &p_description,
+		const int &p_default_value,
+		const String &p_enum_values,
+		bool p_hidden,
+		bool p_ephemeral) :
+		GDREConfigSetting(p_full_name, p_brief, p_description, p_default_value, p_hidden, p_ephemeral) {
+	enum_values = p_enum_values.split(",");
+}
+
+bool GDREConfigSettingEnum::has_special_value() const {
+	return true;
+}
+
+Dictionary GDREConfigSettingEnum::get_list_of_possible_values() const {
+	Dictionary ret;
+	for (int i = 0; i < enum_values.size(); i++) {
+		ret[i] = enum_values[i];
+	}
+	return ret;
+}
+
+GDREConfigSettingRange::GDREConfigSettingRange(
+		const String &p_full_name,
+		const String &p_brief,
+		const String &p_description,
+		const Variant &p_default_value,
+		const String &p_range_string, bool p_hidden, bool p_ephemeral) :
+		GDREConfigSetting(p_full_name, p_brief, p_description, p_default_value, p_hidden, p_ephemeral) {
+	auto parts = p_range_string.split(",");
+	ERR_FAIL_COND_MSG(parts.size() != 3, "Invalid range string: " + p_range_string);
+	if (p_default_value.get_type() == Variant::Type::INT) {
+		min_value = parts[0].to_int();
+		max_value = parts[1].to_int();
+		step_value = parts[2].to_int();
+	} else if (p_default_value.get_type() == Variant::Type::FLOAT) {
+		min_value = parts[0].to_float();
+		max_value = parts[1].to_float();
+		step_value = parts[2].to_float();
+	} else {
+		ERR_FAIL_MSG("Invalid range string: " + p_range_string);
+	}
+}
+
+Variant GDREConfigSettingRange::get_min_value() const {
+	return min_value;
+}
+
+Variant GDREConfigSettingRange::get_max_value() const {
+	return max_value;
+}
+
+Variant GDREConfigSettingRange::get_step_value() const {
+	return step_value;
+}
+
+bool GDREConfigSettingRange::is_range_setting() const {
+	return true;
 }
 
 void GDREConfigSetting::_bind_methods() {
@@ -574,6 +768,10 @@ void GDREConfigSetting::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_filepicker"), &GDREConfigSetting::is_filepicker);
 	ClassDB::bind_method(D_METHOD("is_dirpicker"), &GDREConfigSetting::is_dirpicker);
 	ClassDB::bind_method(D_METHOD("is_virtual_setting"), &GDREConfigSetting::is_virtual_setting);
+	ClassDB::bind_method(D_METHOD("is_range_setting"), &GDREConfigSetting::is_range_setting);
+	ClassDB::bind_method(D_METHOD("get_min_value"), &GDREConfigSetting::get_min_value);
+	ClassDB::bind_method(D_METHOD("get_max_value"), &GDREConfigSetting::get_max_value);
+	ClassDB::bind_method(D_METHOD("get_step_value"), &GDREConfigSetting::get_step_value);
 	ClassDB::bind_method(D_METHOD("get_error_message"), &GDREConfigSetting::get_error_message);
 	ClassDB::bind_method(D_METHOD("clear_error_message"), &GDREConfigSetting::clear_error_message);
 	ClassDB::bind_method(D_METHOD("has_special_value"), &GDREConfigSetting::has_special_value);

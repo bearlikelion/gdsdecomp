@@ -6,9 +6,12 @@
 #include "core/error/error_macros.h"
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
+#include "core/version_generated.gen.h"
+#include "scene/resources/text_file.h"
 #include "utility/common.h"
-#include "utility/file_access_buffer.h"
+#include "utility/file_access_string.h"
 #include "utility/gdre_settings.h"
+#include "utility/godot_mono_decomp_wrapper.h"
 #include "utility/resource_info.h"
 
 Ref<CompatFormatLoader> ResourceCompatLoader::loaders[ResourceCompatLoader::MAX_LOADERS];
@@ -17,6 +20,7 @@ int ResourceCompatLoader::loader_count = 0;
 int ResourceCompatLoader::converter_count = 0;
 bool ResourceCompatLoader::doing_gltf_load = false;
 bool ResourceCompatLoader::globally_available = false;
+bool ResourceCompatLoader::initialized = false;
 
 #define FAIL_LOADER_NOT_FOUND(loader)                                                                                                                        \
 	if (loader.is_null()) {                                                                                                                                  \
@@ -83,7 +87,7 @@ static Vector<Pair<String, Vector<String>>> core_recognized_extensions_v2 = {
 	{ "res", { "Resource", "Curve2D", "RectangleShape2D", "RayShape", "AudioStreamMPC", "AudioStream", "World2D", "FixedMaterial", "GDScript", "Animation", "MeshLibrary", "AudioStreamSpeex", "VideoStream", "VideoStreamTheora", "AtlasTexture", "Shape2D", "World", "RoomBounds", "StyleBoxImageMask", "StyleBoxEmpty", "EventStreamChibi", "Mesh", "EventStream", "ConcavePolygonShape2D", "LineShape2D", "ColorRamp", "BakedLight", "Translation", "Shape", "CapsuleShape2D", "ImageTexture", "BitmapFont", "Script", "Environment", "DynamicFontData", "Object", "Font", "ConcavePolygonShape", "MultiMesh", "RenderTargetTexture", "SegmentShape2D", "BoxShape", "CanvasItemMaterial", "DynamicFont", "LargeTexture", "ShortCut", "Curve3D", "BitMap", "CubeMap", "NavigationMesh", "CapsuleShape", "StyleBoxFlat", "PlaneShape", "ConvexPolygonShape2D", "Sample", "CanvasItemShader", "PHashTranslation", "AudioStreamOpus", "PackedDataContainer", "MaterialShader", "ShaderMaterial", "Resource", "ShaderGraph", "StyleBoxTexture", "ConvexPolygonShape", "PolygonPathFinder", "Reference", "OccluderPolygon2D", "Material", "AudioStreamOGGVorbis", "Texture", "RayShape2D", "Theme", "CanvasItemShaderGraph", "SpriteFrames", "PackedScene", "SampleLibrary", "Shader", "EditorSettings", "NavigationPolygon", "SphereShape", "MaterialShaderGraph", "CircleShape2D", "StyleBox", "TileSet" } },
 };
 
-HashMap<String, HashSet<String>> _init_ext_to_types() {
+static inline HashMap<String, HashSet<String>> _init_v3_ext_to_types() {
 	HashMap<String, HashSet<String>> map;
 	for (const auto &pair : core_recognized_extensions_v3) {
 		if (!map.has(pair.first)) {
@@ -93,6 +97,11 @@ HashMap<String, HashSet<String>> _init_ext_to_types() {
 			map[pair.first].insert(type);
 		}
 	}
+	return map;
+}
+
+static inline HashMap<String, HashSet<String>> _init_v2_ext_to_types() {
+	HashMap<String, HashSet<String>> map;
 	for (const auto &pair : core_recognized_extensions_v2) {
 		if (!map.has(pair.first)) {
 			map[pair.first] = HashSet<String>();
@@ -104,7 +113,7 @@ HashMap<String, HashSet<String>> _init_ext_to_types() {
 	return map;
 }
 
-HashMap<String, HashSet<String>> _init_type_to_exts() {
+static inline HashMap<String, HashSet<String>> _init_type_to_exts() {
 	HashMap<String, HashSet<String>> map;
 	for (const auto &pair : core_recognized_extensions_v3) {
 		if (!map.has(pair.first)) {
@@ -125,8 +134,30 @@ HashMap<String, HashSet<String>> _init_type_to_exts() {
 	return map;
 }
 
-static HashMap<String, HashSet<String>> ext_to_types = _init_ext_to_types();
+static HashMap<String, HashSet<String>> _init_v4_ext_to_types() {
+	LocalVector<StringName> types;
+	ClassDB::get_class_list(types);
+	HashMap<String, HashSet<String>> map;
+	for (const StringName &type : types) {
+		List<String> extensions;
+		ClassDB::get_extensions_for_type(type, &extensions);
+		for (const String &extension : extensions) {
+			if (!map.has(extension)) {
+				map[extension] = HashSet<String>();
+			}
+			map[extension].insert(type);
+		}
+	}
+	return map;
+}
+
 static HashMap<String, HashSet<String>> type_to_exts = _init_type_to_exts();
+static HashMap<String, HashSet<String>> ext_to_v2_types = _init_v2_ext_to_types();
+static HashMap<String, HashSet<String>> ext_to_v3_types = _init_v3_ext_to_types();
+
+// NOTE: this has to be initialized at the END of the engine's initialization, so we can't do it here statically;
+// _init() has to be called after all the modules have been initialized.
+static HashMap<String, HashSet<String>> ext_to_v4_types;
 //	static void get_base_extensions(List<String> *p_extensions);
 
 void ResourceCompatLoader::get_base_extensions(List<String> *p_extensions, int ver_major) {
@@ -156,7 +187,13 @@ void ResourceCompatLoader::get_base_extensions(List<String> *p_extensions, int v
 	for (const String &ext : *p_extensions) {
 		unique_extensions.insert(ext);
 	}
-	for (const auto &pair : ext_to_types) {
+	for (const auto &pair : ext_to_v3_types) {
+		if (!unique_extensions.has(pair.key)) {
+			unique_extensions.insert(pair.key);
+			p_extensions->push_back(pair.key);
+		}
+	}
+	for (const auto &pair : ext_to_v2_types) {
 		if (!unique_extensions.has(pair.key)) {
 			unique_extensions.insert(pair.key);
 			p_extensions->push_back(pair.key);
@@ -183,6 +220,91 @@ void ResourceCompatLoader::get_base_extensions_for_type(const String &p_type, Li
 	}
 }
 
+Vector<String> ResourceCompatLoader::get_base_extension_set_for_type(const String &p_type, int ver_major) {
+	Vector<String> extensions;
+	bool has_res = false;
+
+	if (ver_major > 0) {
+		switch (ver_major) {
+			case 1:
+			case 2:
+			case 3:
+			case 4: {
+				auto &ext_map = ver_major == 4 ? ext_to_v4_types : (ver_major == 3 ? ext_to_v3_types : ext_to_v2_types);
+				for (const auto &[ext, types] : ext_map) {
+					if (p_type.is_empty() || types.has(p_type)) {
+						if (ext == "res") {
+							has_res = true; // ensure it comes last
+						} else {
+							extensions.push_back(ext);
+						}
+					}
+				}
+			} break;
+			default:
+				ERR_FAIL_V_MSG(extensions, "Invalid version.");
+		}
+	} else {
+		List<String> base_extensions;
+		get_base_extensions_for_type(p_type, &base_extensions);
+		for (const String &ext : extensions) {
+			if (ext == "res") {
+				has_res = true;
+			} else {
+				extensions.push_back(ext);
+			}
+		}
+	}
+	if (has_res) {
+		extensions.push_back("res");
+	}
+	return extensions;
+}
+
+static inline void add_types_from_ext_to_types(const HashMap<String, HashSet<String>> &ext_to_types, const String &p_extension, HashSet<String> &unique_types) {
+	if (ext_to_types.has(p_extension)) {
+		const HashSet<String> &types = ext_to_types.get(p_extension);
+		for (const String &type : types) {
+			unique_types.insert(type);
+		}
+	}
+}
+
+void ResourceCompatLoader::get_type_for_extension(const String &p_extension, List<String> *p_types, int ver_major) {
+	HashSet<String> unique_types;
+	if (ver_major <= 2) {
+		add_types_from_ext_to_types(ext_to_v2_types, p_extension, unique_types);
+	}
+	if (ver_major == 3 || ver_major <= 0) {
+		add_types_from_ext_to_types(ext_to_v3_types, p_extension, unique_types);
+	}
+	if (ver_major == GODOT_VERSION_MAJOR || ver_major <= 0) {
+		add_types_from_ext_to_types(ext_to_v4_types, p_extension, unique_types);
+	}
+}
+
+// TODO: A more comprehensive way to handle cases like this
+// Also make Resource savers use this after proper testing
+String ResourceCompatLoader::object_get_class_name_for_saving(const Object *p_object) {
+	String class_name = p_object->get_class();
+	if (class_name == "FakeGDScript") {
+		return "GDScript";
+	} else if (class_name == "FakeCSharpScript") {
+		return "CSharpScript";
+	} else if (class_name == "FakeGDNativeScript") {
+		return "GDNativeScript";
+	}
+	const FakeScript *fake_script = Object::cast_to<FakeScript>(p_object);
+	if (fake_script != nullptr) {
+		return fake_script->get_original_class();
+	}
+	const MissingResource *missing_resource = Object::cast_to<MissingResource>(p_object);
+	if (missing_resource != nullptr) {
+		return missing_resource->get_original_class();
+	}
+	return class_name;
+}
+
 Ref<Resource> ResourceCompatLoader::fake_load(const String &p_path, const String &p_type_hint, Error *r_error) {
 	auto loadr = get_loader_for_path(p_path, p_type_hint);
 	FAIL_LOADER_NOT_FOUND(loadr);
@@ -207,7 +329,7 @@ Ref<Resource> ResourceCompatLoader::gltf_load(const String &p_path, const String
 	return ResourceCompatLoader::custom_load(p_path, p_type_hint, ResourceInfo::LoadType::GLTF_LOAD, r_error);
 }
 
-Ref<Resource> ResourceCompatLoader::real_load(const String &p_path, const String &p_type_hint, Error *r_error, ResourceFormatLoader::CacheMode p_cache_mode) {
+Ref<Resource> ResourceCompatLoader::real_load(const String &p_path, const String &p_type_hint, Error *r_error, ResourceCompatLoader::CacheMode p_cache_mode) {
 	return ResourceCompatLoader::custom_load(p_path, p_type_hint, ResourceInfo::LoadType::REAL_LOAD, r_error, true, p_cache_mode);
 }
 namespace {
@@ -217,15 +339,25 @@ String _validate_local_path(const String &p_path) {
 		return ResourceUID::get_singleton()->get_id_path(uid);
 	} else if (p_path.is_relative_path()) {
 		return ("res://" + p_path).simplify_path();
-	} else if ((GDRESettings::get_singleton()->is_pack_loaded() || !GDRESettings::get_singleton()->get_project_path().is_empty()) && p_path.is_absolute_path() && !p_path.begins_with("res://") && !p_path.begins_with("user://")) {
+	} else {
 		return GDRESettings::get_singleton()->localize_path(p_path);
 	}
 	return p_path;
 }
+
+void _ensure_path(const Ref<Resource> &res, const String &p_path, bool is_real_load, ResourceCompatLoader::CacheMode p_cache_mode) {
+	if (res.is_valid() && res->get_path().is_empty()) {
+		if (is_real_load && p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP && p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
+			res->set_path(p_path, p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE || p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE_DEEP);
+		} else {
+			res->set_path_cache(p_path);
+		}
+	}
+}
 } //namespace
 
 thread_local HashSet<String> currently_loading_paths;
-Ref<Resource> ResourceCompatLoader::custom_load(const String &p_path, const String &p_type_hint, ResourceInfo::LoadType p_type, Error *r_error, bool use_threads, ResourceFormatLoader::CacheMode p_cache_mode) {
+Ref<Resource> ResourceCompatLoader::custom_load(const String &p_path, const String &p_type_hint, ResourceInfo::LoadType p_type, Error *r_error, bool use_threads, ResourceCompatLoader::CacheMode p_cache_mode) {
 	String local_path = _validate_local_path(p_path);
 	String res_path = GDRESettings::get_singleton()->get_mapped_path(p_path);
 	bool is_real_load = p_type == ResourceInfo::LoadType::REAL_LOAD || p_type == ResourceInfo::LoadType::GLTF_LOAD;
@@ -242,13 +374,7 @@ Ref<Resource> ResourceCompatLoader::custom_load(const String &p_path, const Stri
 		currently_loading_paths.insert(res_path);
 		Ref<Resource> res = load_with_real_resource_loader(local_path, p_type_hint, r_error, use_threads, p_cache_mode);
 		currently_loading_paths.erase(res_path);
-		if (res.is_valid() && res->get_path() != local_path) {
-			if (is_real_load && p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP && p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
-				res->set_path(local_path, p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE || p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE_DEEP);
-			} else {
-				res->set_path_cache(local_path);
-			}
-		}
+		_ensure_path(res, local_path, is_real_load, p_cache_mode);
 		return res;
 	}
 	FAIL_LOADER_NOT_FOUND(loader);
@@ -259,39 +385,27 @@ Ref<Resource> ResourceCompatLoader::custom_load(const String &p_path, const Stri
 	currently_loading_paths.insert(res_path);
 	Ref<Resource> res = loader->custom_load(res_path, local_path, p_type, r_error, use_threads, p_cache_mode);
 	currently_loading_paths.erase(res_path);
-	if (res.is_valid()) {
-		if (res->get_path().is_empty()) {
-			if (is_real_load && p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP && p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
-				res->set_path(local_path, p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE || p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE_DEEP);
-			} else {
-				res->set_path_cache(local_path);
-			}
-		}
-	}
+	_ensure_path(res, local_path, is_real_load, p_cache_mode);
 	return res;
 }
 
-Ref<Resource> ResourceCompatLoader::load_with_real_resource_loader(const String &p_path, const String &p_type_hint, Error *r_error, bool use_threads, ResourceFormatLoader::CacheMode p_cache_mode) {
+Ref<Resource> ResourceCompatLoader::load_with_real_resource_loader(const String &p_path, const String &p_type_hint, Error *r_error, bool use_threads, ResourceCompatLoader::CacheMode p_cache_mode) {
 	String local_path = _validate_local_path(p_path);
+	Ref<Resource> res;
 	if (use_threads) {
-		return ResourceLoader::load(local_path, p_type_hint, p_cache_mode, r_error);
-	}
-	auto load_token = ResourceLoader::_load_start(local_path, p_type_hint, ResourceLoader::LoadThreadMode::LOAD_THREAD_FROM_CURRENT, p_cache_mode);
-	if (!load_token.is_valid()) {
-		if (r_error) {
-			*r_error = FAILED;
+		res = ResourceLoader::load(local_path, p_type_hint, p_cache_mode, r_error);
+	} else {
+		auto load_token = ResourceLoader::_load_start(local_path, p_type_hint, ResourceLoader::LoadThreadMode::LOAD_THREAD_FROM_CURRENT, p_cache_mode);
+		if (!load_token.is_valid()) {
+			if (r_error) {
+				*r_error = FAILED;
+			}
+			return Ref<Resource>();
 		}
-		return Ref<Resource>();
+		res = ResourceLoader::_load_complete(*load_token.ptr(), r_error);
 	}
 
-	Ref<Resource> res = ResourceLoader::_load_complete(*load_token.ptr(), r_error);
-	if (res.is_valid() && res->get_path().is_empty()) {
-		if (p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP && p_cache_mode != ResourceFormatLoader::CACHE_MODE_IGNORE) {
-			res->set_path(local_path, p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE || p_cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE_DEEP);
-		} else {
-			res->set_path_cache(local_path);
-		}
-	}
+	_ensure_path(res, local_path, true, p_cache_mode);
 
 	return res;
 }
@@ -443,7 +557,7 @@ Error ResourceCompatLoader::to_text(const String &p_path, const String &p_dst, u
 	return saver.save(p_dst, res, p_flags);
 }
 
-String ResourceCompatLoader::resource_to_string(const String &p_path, bool p_skip_cr) {
+String ResourceCompatLoader::resource_file_to_string(const String &p_path) {
 	ERR_FAIL_COND_V_MSG(p_path.is_empty(), "", "Path is empty");
 	String orig_path;
 	String path = p_path;
@@ -458,7 +572,12 @@ String ResourceCompatLoader::resource_to_string(const String &p_path, bool p_ski
 		return ProjectConfigLoader::get_project_settings_as_string(path);
 	}
 	String ext = path.get_extension().to_lower();
-	if (ext == "tres" || ext == "tscn" || !handles_resource(path, "")) {
+	if (ext == "cs" && GDRESettings::get_singleton()->has_loaded_dotnet_assembly()) {
+		String code = GDRESettings::get_singleton()->get_dotnet_decompiler()->decompile_individual_file(path);
+		return code;
+	}
+
+	if (FileAccess::exists(path) && (ext == "tres" || ext == "tscn" || ext == "gd" || ext == "cs" || !handles_resource(path, ""))) {
 		Error err;
 		Ref<FileAccess> f = FileAccess::open(path, FileAccess::READ, &err);
 		if (f.is_null() || err != OK) {
@@ -468,6 +587,9 @@ String ResourceCompatLoader::resource_to_string(const String &p_path, bool p_ski
 			return "ERROR: Failed to open file: " + path;
 		}
 		auto buf = f->get_buffer(f->get_length());
+		if (buf.size() == 0 || (buf.size() == 1 && buf[0] == 0)) {
+			return "";
+		}
 		if (ext == "tres" || ext == "tscn" || gdre::detect_utf8(buf)) {
 			String str;
 			str.append_utf8((const char *)buf.ptr(), buf.size());
@@ -485,18 +607,37 @@ String ResourceCompatLoader::resource_to_string(const String &p_path, bool p_ski
 		return "ERROR: Failed to load " + path;
 	}
 
-	int64_t length = FileAccess::get_size(path);
+	return resource_to_string(res);
+}
+
+String ResourceCompatLoader::resource_to_string(const Ref<Resource> &res) {
+	ERR_FAIL_COND_V_MSG(res.is_null(), "", "Resource is null");
+	int64_t length = 1024;
+	String path = res->get_path();
+	if (!path.is_empty() && FileAccess::exists(path)) {
+		length = FileAccess::get_size(path);
+	}
 	Ref<Script> script = res;
 	if (script.is_valid()) {
 		return script->get_source_code();
 	}
+	Ref<TextFile> text_file = res;
+	if (text_file.is_valid()) {
+		return text_file->get_text();
+	}
 
-	Ref<FileAccessBuffer> f = FileAccessBuffer::create(FileAccessBuffer::RESIZE_OPTIMIZED);
+	Ref<FileAccessString> f = FileAccessString::create();
 	f->reserve(length * 3);
 
+	Error err = OK;
 	String save_path;
 	String base_ext = path.get_basename().get_basename().get_extension();
-	if (path.contains(".converted.") && (base_ext == "xml" || base_ext == "x" + path.get_extension().to_lower())) {
+	bool optimized = path.contains(".optimized.");
+	bool optimized_or_converted = optimized || path.contains(".converted.");
+	if (optimized && path.has_extension("scn")) {
+		base_ext = "xml";
+	}
+	if (optimized_or_converted && (base_ext == "xml" || base_ext == "x" + path.get_extension().to_lower())) {
 		ResourceFormatSaverXMLInstance saver;
 		save_path = path.get_basename() + ".xml";
 		err = saver.save_to_file(f, save_path, res, 0);
@@ -569,16 +710,36 @@ String ResourceCompatLoader::get_resource_type(const String &p_path) {
 	return loader->get_resource_type(p_path);
 }
 
-Vector<String> ResourceCompatLoader::_get_dependencies(const String &p_path, bool p_add_types) {
-	auto loader = get_loader_for_path(p_path, "");
-	ERR_FAIL_COND_V_MSG(loader.is_null(), Vector<String>(), "Failed to load resource '" + p_path + "'. ResourceFormatLoader::load was not implemented for this resource type.");
-	List<String> dependencies;
-	loader->get_dependencies(p_path, &dependencies, p_add_types);
-	Vector<String> deps;
-	for (List<String>::Element *E = dependencies.front(); E; E = E->next()) {
-		deps.push_back(E->get());
+bool ResourceCompatLoader::exists(const String &p_path) {
+	String local_path = _validate_local_path(p_path);
+	if (ResourceCache::has(local_path)) {
+		return true; // If cached, it probably exists
 	}
-	return deps;
+
+	String path = GDRESettings::get_singleton()->get_mapped_path(local_path);
+
+	for (int i = 0; i < loader_count; i++) {
+		if (!loaders[i]->recognize_path(path, "")) {
+			continue;
+		}
+
+		if (loaders[i]->exists(path)) {
+			return true;
+		}
+	}
+	return ResourceLoader::exists(path);
+}
+
+bool ResourceCompatLoader::has_custom_uid_support(const String &p_path) {
+	if (FileAccess::exists(p_path + ".import")) {
+		return true;
+	}
+
+	auto loader = get_loader_for_path(p_path, "");
+	if (loader.is_null()) {
+		return false;
+	}
+	return loader->has_custom_uid_support();
 }
 
 bool ResourceCompatLoader::is_default_gltf_load() {
@@ -613,11 +774,16 @@ bool ResourceCompatLoader::is_globally_available() {
 	return globally_available;
 }
 
-Error ResourceCompatLoader::save_custom(const Ref<Resource> &p_resource, const String &p_path, int ver_major, int ver_minor) {
+Error ResourceCompatLoader::save_custom(const Ref<Resource> &p_resource, const String &p_path, int ver_major, int ver_minor, uint32_t p_flags) {
 	String path = GDRESettings::get_singleton()->globalize_path(p_path);
-	ERR_FAIL_COND_V_MSG(ver_major <= 0, ERR_INVALID_PARAMETER, "Invalid version info");
+	ERR_FAIL_COND_V_MSG(ver_major < 0, ERR_INVALID_PARAMETER, "Invalid version info");
 	Error err = gdre::ensure_dir(path.get_base_dir());
 	ERR_FAIL_COND_V_MSG(err != OK, err, "Could not ensure directory for " + path);
+	String ext = path.get_extension().to_lower();
+	if (ext == "xml" || ext == "xscn" || ext == "xres" || (ver_major <= 2 && ext.begins_with("x") && ext_to_v2_types.has(ext.substr(1)))) {
+		ResourceFormatSaverXML saver;
+		return saver.save_custom(p_resource, path, 0, ver_major, ver_minor, p_flags);
+	}
 	if (path.get_extension() == "tres" || path.get_extension() == "tscn") {
 		int ver_format = ResourceFormatSaverCompatText::get_default_format_version(ver_major, ver_minor);
 		ResourceFormatSaverCompatText saver;
@@ -646,24 +812,80 @@ String ResourceCompatConverter::get_resource_name(const Ref<MissingResource> &re
 	return name;
 }
 
+Error ResourceCompatLoader::save_custom_to_file(const Ref<Resource> &p_resource, const String &p_path, Ref<FileAccess> &p_f, int ver_major, int ver_minor, uint32_t p_flags) {
+	String path = GDRESettings::get_singleton()->globalize_path(p_path);
+	ERR_FAIL_COND_V_MSG(ver_major < 0, ERR_INVALID_PARAMETER, "Invalid version info");
+	Error err = gdre::ensure_dir(path.get_base_dir());
+	ERR_FAIL_COND_V_MSG(err != OK, err, "Could not ensure directory for " + path);
+	String ext = path.get_extension().to_lower();
+	if (ext == "xml" || ext == "xscn" || ext == "xres" || (ver_major <= 2 && ext.begins_with("x") && ext_to_v2_types.has(ext.substr(1)))) {
+		uint32_t flags = CompatFormatLoader::set_version_info_in_flags(p_flags, 0, ver_major, ver_minor);
+		ResourceFormatSaverXMLInstance saver;
+		return saver.save_to_file(p_f, path, p_resource, flags);
+	}
+	if (path.get_extension() == "tres" || path.get_extension() == "tscn") {
+		int ver_format = ResourceFormatSaverCompatText::get_default_format_version(ver_major, ver_minor);
+		uint32_t flags = CompatFormatLoader::set_version_info_in_flags(p_flags, ver_format, ver_major, ver_minor);
+		ResourceFormatSaverCompatTextInstance saver;
+		return saver.save_to_file(p_f, path, p_resource, flags);
+	}
+	int ver_format = ResourceFormatSaverCompatBinary::get_default_format_version(ver_major, ver_minor);
+	uint32_t flags = CompatFormatLoader::set_version_info_in_flags(p_flags, ver_format, ver_major, ver_minor);
+	ResourceFormatSaverCompatBinaryInstance saver;
+	return saver.save_to_file(p_f, path, p_resource, flags);
+}
+
+void ResourceCompatLoader::_init() {
+	if (ResourceCompatLoader::initialized) {
+		return;
+	}
+	ext_to_v4_types = _init_v4_ext_to_types();
+	initialized = true;
+	return;
+}
+
+#ifdef TESTS_ENABLED
+void ResourceCompatLoader::_deinit() {
+	if (!ResourceCompatLoader::initialized) {
+		return;
+	}
+	ext_to_v4_types.clear();
+	initialized = false;
+}
+#endif
+
+namespace CoreBind {
+
+Vector<String> ResourceCompatLoader::_get_dependencies(const String &p_path, bool p_add_types) {
+	auto loader = ::ResourceCompatLoader::get_loader_for_path(p_path, "");
+	ERR_FAIL_COND_V_MSG(loader.is_null(), Vector<String>(), "Failed to load resource '" + p_path + "'. ResourceFormatLoader::load was not implemented for this resource type.");
+	List<String> dependencies;
+	loader->get_dependencies(p_path, &dependencies, p_add_types);
+	Vector<String> deps;
+	for (List<String>::Element *E = dependencies.front(); E; E = E->next()) {
+		deps.push_back(E->get());
+	}
+	return deps;
+}
+
 Ref<Resource> ResourceCompatLoader::_fake_load(const String &p_path, const String &p_type_hint) {
-	return fake_load(p_path, p_type_hint, nullptr);
+	return ::ResourceCompatLoader::fake_load(p_path, p_type_hint, nullptr);
 }
 
 Ref<Resource> ResourceCompatLoader::_non_global_load(const String &p_path, const String &p_type_hint) {
-	return non_global_load(p_path, p_type_hint, nullptr);
+	return ::ResourceCompatLoader::non_global_load(p_path, p_type_hint, nullptr);
 }
 
 Ref<Resource> ResourceCompatLoader::_gltf_load(const String &p_path, const String &p_type_hint) {
-	return gltf_load(p_path, p_type_hint, nullptr);
+	return ::ResourceCompatLoader::gltf_load(p_path, p_type_hint, nullptr);
 }
 
-Ref<Resource> ResourceCompatLoader::_real_load(const String &p_path, const String &p_type_hint, ResourceFormatLoader::CacheMode p_cache_mode) {
-	return real_load(p_path, p_type_hint, nullptr, p_cache_mode);
+Ref<Resource> ResourceCompatLoader::_real_load(const String &p_path, const String &p_type_hint, CacheMode p_cache_mode) {
+	return ::ResourceCompatLoader::real_load(p_path, p_type_hint, nullptr, (::ResourceCompatLoader::CacheMode)p_cache_mode);
 }
 
 Dictionary ResourceCompatLoader::_get_resource_info(const String &p_path, const String &p_type_hint) {
-	Ref<ResourceInfo> info = get_resource_info(p_path, p_type_hint, nullptr);
+	Ref<ResourceInfo> info = ::ResourceCompatLoader::get_resource_info(p_path, p_type_hint, nullptr);
 	if (info.is_valid()) {
 		return info->to_dict();
 	}
@@ -671,35 +893,41 @@ Dictionary ResourceCompatLoader::_get_resource_info(const String &p_path, const 
 }
 
 void ResourceCompatLoader::_bind_methods() {
+	BIND_ENUM_CONSTANT(CACHE_MODE_IGNORE);
+	BIND_ENUM_CONSTANT(CACHE_MODE_REUSE);
+	BIND_ENUM_CONSTANT(CACHE_MODE_REPLACE);
+	BIND_ENUM_CONSTANT(CACHE_MODE_IGNORE_DEEP);
+	BIND_ENUM_CONSTANT(CACHE_MODE_REPLACE_DEEP);
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("fake_load", "path", "type_hint"), &ResourceCompatLoader::_fake_load, DEFVAL(""));
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("non_global_load", "path", "type_hint"), &ResourceCompatLoader::_non_global_load, DEFVAL(""));
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("gltf_load", "path", "type_hint"), &ResourceCompatLoader::_gltf_load, DEFVAL(""));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("real_load", "path", "type_hint", "cache_mode"), &ResourceCompatLoader::_real_load, DEFVAL(""), DEFVAL(ResourceFormatLoader::CACHE_MODE_REUSE));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("add_resource_format_loader", "loader", "at_front"), &ResourceCompatLoader::add_resource_format_loader, DEFVAL(false));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("remove_resource_format_loader", "loader"), &ResourceCompatLoader::remove_resource_format_loader);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("add_resource_object_converter", "converter", "at_front"), &ResourceCompatLoader::add_resource_object_converter, DEFVAL(false));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("remove_resource_object_converter", "converter"), &ResourceCompatLoader::remove_resource_object_converter);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("real_load", "path", "type_hint", "cache_mode"), &ResourceCompatLoader::_real_load, DEFVAL(""), DEFVAL(CACHE_MODE_REUSE));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("add_resource_format_loader", "loader", "at_front"), &::ResourceCompatLoader::add_resource_format_loader, DEFVAL(false));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("remove_resource_format_loader", "loader"), &::ResourceCompatLoader::remove_resource_format_loader);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("add_resource_object_converter", "converter", "at_front"), &::ResourceCompatLoader::add_resource_object_converter, DEFVAL(false));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("remove_resource_object_converter", "converter"), &::ResourceCompatLoader::remove_resource_object_converter);
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_resource_info", "path", "type_hint"), &ResourceCompatLoader::_get_resource_info, DEFVAL(""));
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_dependencies", "path", "add_types"), &ResourceCompatLoader::_get_dependencies, DEFVAL(false));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("to_text", "path", "dst", "flags", "original_path"), &ResourceCompatLoader::to_text, DEFVAL(0), DEFVAL(""));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("to_binary", "path", "dst", "flags"), &ResourceCompatLoader::to_binary, DEFVAL(0));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("make_globally_available"), &ResourceCompatLoader::make_globally_available);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("unmake_globally_available"), &ResourceCompatLoader::unmake_globally_available);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("is_globally_available"), &ResourceCompatLoader::is_globally_available);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("set_default_gltf_load", "enable"), &ResourceCompatLoader::set_default_gltf_load);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("is_default_gltf_load"), &ResourceCompatLoader::is_default_gltf_load);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("handles_resource", "path", "type_hint"), &ResourceCompatLoader::handles_resource, DEFVAL(""));
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_resource_script_class", "path"), &ResourceCompatLoader::get_resource_script_class);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_resource_type", "path"), &ResourceCompatLoader::get_resource_type);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("save_custom", "resource", "path", "ver_major", "ver_minor"), &ResourceCompatLoader::save_custom);
-	ClassDB::bind_static_method(get_class_static(), D_METHOD("resource_to_string", "path", "skip_cr"), &ResourceCompatLoader::resource_to_string, DEFVAL(true));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("to_text", "path", "dst", "flags", "original_path"), &::ResourceCompatLoader::to_text, DEFVAL(0), DEFVAL(""));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("to_binary", "path", "dst", "flags"), &::ResourceCompatLoader::to_binary, DEFVAL(0));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("make_globally_available"), &::ResourceCompatLoader::make_globally_available);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("unmake_globally_available"), &::ResourceCompatLoader::unmake_globally_available);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("is_globally_available"), &::ResourceCompatLoader::is_globally_available);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("set_default_gltf_load", "enable"), &::ResourceCompatLoader::set_default_gltf_load);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("is_default_gltf_load"), &::ResourceCompatLoader::is_default_gltf_load);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("handles_resource", "path", "type_hint"), &::ResourceCompatLoader::handles_resource, DEFVAL(""));
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_resource_script_class", "path"), &::ResourceCompatLoader::get_resource_script_class);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_resource_type", "path"), &::ResourceCompatLoader::get_resource_type);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("save_custom", "resource", "path", "ver_major", "ver_minor"), &::ResourceCompatLoader::save_custom);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("resource_file_to_string", "path"), &::ResourceCompatLoader::resource_file_to_string);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("resource_to_string", "resource"), &::ResourceCompatLoader::resource_to_string);
 	ClassDB::bind_integer_constant(get_class_static(), "LoadType", "FAKE_LOAD", ResourceInfo::FAKE_LOAD);
 	ClassDB::bind_integer_constant(get_class_static(), "LoadType", "NON_GLOBAL_LOAD", ResourceInfo::NON_GLOBAL_LOAD);
 	ClassDB::bind_integer_constant(get_class_static(), "LoadType", "GLTF_LOAD", ResourceInfo::GLTF_LOAD);
 	ClassDB::bind_integer_constant(get_class_static(), "LoadType", "REAL_LOAD", ResourceInfo::REAL_LOAD);
 }
-
-Ref<Resource> CompatFormatLoader::custom_load(const String &p_path, const String &p_original_path, ResourceInfo::LoadType p_type, Error *r_error, bool use_threads, ResourceFormatLoader::CacheMode p_cache_mode) {
+} //namespace CoreBind
+Ref<Resource> CompatFormatLoader::custom_load(const String &p_path, const String &p_original_path, ResourceInfo::LoadType p_type, Error *r_error, bool use_threads, ResourceCompatLoader::CacheMode p_cache_mode) {
 	if (r_error) {
 		*r_error = ERR_UNAVAILABLE;
 	}
@@ -723,10 +951,7 @@ Ref<Resource> ResourceCompatConverter::set_real_from_missing_resource(Ref<Missin
 	mr->get_property_list(&property_info);
 	for (auto &property : property_info) {
 		bool is_storage = property.usage & PROPERTY_USAGE_STORAGE;
-		// if (property.usage & PROPERTY_USAGE_STORAGE) {
-		if (property.name == "resource_path") {
-			res->set_path_cache(mr->get(property.name));
-		} else if (is_storage) {
+		if (is_storage) {
 			Ref<MissingResource> m_res = mr->get(property.name);
 			const String &set_prop = prop_map.has(property.name) ? prop_map[property.name] : property.name;
 			if (m_res.is_valid()) {
@@ -734,12 +959,10 @@ Ref<Resource> ResourceCompatConverter::set_real_from_missing_resource(Ref<Missin
 			} else {
 				res->set(set_prop, mr->get(property.name));
 			}
-		} else {
-			// WARN_PRINT("Property " + property.name + " is not storage");
 		}
-		// }
 	}
-	res->set_path_cache(mr->get_path());
+	res->set_local_to_scene(mr->is_local_to_scene());
+	res->set_scene_unique_id(mr->get_scene_unique_id());
 	return res;
 }
 
@@ -758,6 +981,11 @@ bool ResourceCompatConverter::is_external_resource(Ref<MissingResource> mr) {
 Ref<MissingResource> ResourceCompatConverter::get_missing_resource_from_real(Ref<Resource> res, int ver_major, const HashMap<String, String> &required_prop_map) {
 	Ref<MissingResource> mr;
 	mr.instantiate();
+	set_missing_resource_from_real(mr, res, ver_major, required_prop_map);
+	return mr;
+}
+
+void ResourceCompatConverter::set_missing_resource_from_real(Ref<MissingResource> mr, Ref<Resource> res, int ver_major, const HashMap<String, String> &required_prop_map) {
 	mr->set_original_class(res->get_class());
 	mr->set_recording_properties(true);
 	mr->set_path_cache(res->get_path());
@@ -767,12 +995,15 @@ Ref<MissingResource> ResourceCompatConverter::get_missing_resource_from_real(Ref
 	mr->set_scene_unique_id(res->get_scene_unique_id());
 	List<PropertyInfo> property_info;
 	res->get_property_list(&property_info);
+	HashSet<String> properties_to_set;
 	for (auto &property : property_info) {
-		if (required_prop_map.has(property.name)) {
-			mr->set(required_prop_map[property.name], res->get(property.name));
+		properties_to_set.insert(property.name);
+	}
+	for (auto &[new_prop, old_prop] : required_prop_map) {
+		if (properties_to_set.has(new_prop)) {
+			mr->set(old_prop, res->get(new_prop));
 		}
 	}
-	return mr;
 }
 
 Ref<Resource> ResourceCompatConverter::get_real_from_missing_resource(Ref<MissingResource> mr, ResourceInfo::LoadType load_type, const HashMap<String, String> &prop_map) {
@@ -804,4 +1035,26 @@ Ref<Resource> ResourceCompatConverter::get_real_from_missing_resource(Ref<Missin
 
 bool CompatFormatLoader::resource_is_resource(Ref<Resource> p_res, int ver_major) {
 	return p_res.is_valid() && !(ver_major <= 2 && (p_res->get_save_class() == "Image" || Ref<InputEvent>(p_res).is_valid()));
+}
+
+bool CompatFormatLoader::try_force_set_property(const Ref<Resource> &p_res, const StringName &p_name, const Variant &p_value) {
+	if (p_res.is_null()) {
+		return false;
+	}
+	ScriptInstance *si = p_res->get_script_instance();
+	if (si) {
+		if (FakeScriptInstance *fsi = dynamic_cast<FakeScriptInstance *>(si); fsi != nullptr) {
+			Ref<FakeScript> script = fsi->get_script();
+#if DEBUG_ENABLED
+			// If the script is recording properties and is not a fake embedded script, then this is a bug in the script parsing.
+			if (script.is_valid() && script->is_instance_recording_properties() && script->get_class() != "FakeScript") {
+				WARN_PRINT(vformat("Script %s is recording properties, but initial property set failed! Please report this!", script->get_path()));
+			}
+#endif
+			fsi->force_set_property(p_name, p_value);
+			return true;
+		}
+		return false;
+	}
+	return false;
 }

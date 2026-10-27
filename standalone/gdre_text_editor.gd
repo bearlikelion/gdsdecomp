@@ -55,8 +55,11 @@ enum HighlightType {
 	INI_LIKE,
 	GDSHADER,
 	JSON_TEXT,
-	CSHARP
+	CSHARP,
+	XML
 }
+
+var current_type: HighlightType = HighlightType.UNKNOWN
 
 func _add_regions_to_gdscript_highlighter():
 	# Not working, if it ends in a newline, the color wraps to the next line
@@ -103,12 +106,13 @@ func _add_regions_to_gdscript_highlighter():
 	get:
 		return csharp_highlighter
 
-@export var default_highlighter: HighlightType = HighlightType.GDSCRIPT:
+@export var xml_highlighter: GDREXMLHighlighter = preload("res://gdre_xml_highlighter.tres"):
 	set(val):
-		set_highlight_type(val)
-		default_highlighter = val
+		if CODE_VIEWER.syntax_highlighter == xml_highlighter:
+			CODE_VIEWER.syntax_highlighter = val
+		xml_highlighter = val
 	get:
-		return default_highlighter
+		return xml_highlighter
 
 @onready var font_size = get_theme_font_size("TextEdit")
 
@@ -195,16 +199,29 @@ func _init():
 	code_opts_box.add_child(code_opts_panel_button)
 	code_opts_box.add_child(CODE_VIWER_OPTIONS)
 	add_child(code_opts_box)
-	set_highlight_type(default_highlighter)
+	set_text_viewer_props()
 
 func _ready():
-	set_highlight_type(default_highlighter)
+	set_highlight_type(HighlightType.UNKNOWN)
 
 func reset():
 	current_path = ""
 	set_viewer_text("")
-	set_text_viewer_props()
+	set_highlight_type(HighlightType.UNKNOWN)
 	pass
+
+func reload_from_disk():
+	if current_path.is_empty():
+		return
+	var h_scroll = CODE_VIEWER.scroll_horizontal
+	var v_scroll = CODE_VIEWER.scroll_vertical
+	var caret_line = CODE_VIEWER.get_caret_line()
+	var caret_column = CODE_VIEWER.get_caret_column()
+	load_path(current_path, current_type)
+	CODE_VIEWER.scroll_horizontal = h_scroll
+	CODE_VIEWER.scroll_vertical = v_scroll
+	CODE_VIEWER.set_caret_line(caret_line, false)
+	CODE_VIEWER.set_caret_column(caret_column, false)
 
 func set_viewer_text(text: String):
 	# This is a workaround for a bug in CodeEdit where setting the text property throws errors when wrapping is enabled
@@ -262,12 +279,12 @@ func load_code(path, override_bytecode_revision: int = 0) -> bool:
 			if GDRESettings.has_loaded_dotnet_assembly():
 				var decompiler = GDRESettings.get_dotnet_decompiler()
 				code_text = decompiler.decompile_individual_file(path)
-				set_csharp_viewer_props()
+				set_highlight_type(HighlightType.CSHARP)
 			else:
 				code_text = "Error loading script:\nNo .NET assembly loaded"
-				set_text_viewer_props()
+				set_highlight_type(HighlightType.TEXT)
 		else:
-			set_csharp_viewer_props()
+			set_highlight_type(HighlightType.CSHARP)
 	elif ext == "gde" or ext == "gdc":
 		var script: FakeGDScript = FakeGDScript.new()
 		if (override_bytecode_revision != 0):
@@ -275,26 +292,34 @@ func load_code(path, override_bytecode_revision: int = 0) -> bool:
 		script.load_source_code(path)
 		if not script.get_error_message().is_empty():
 			code_text = "Error loading script:\n" + script.get_error_message()
-			set_text_viewer_props()
+			set_highlight_type(HighlightType.TEXT)
 		else:
 			code_text = script.get_source_code()
-			set_code_viewer_props()
+			set_highlight_type(HighlightType.GDSCRIPT)
 	else: # ext == "gd"
 		code_text = FileAccess.get_file_as_string(path)
-		set_code_viewer_props()
+		set_highlight_type(HighlightType.GDSCRIPT)
 
 	set_viewer_text(code_text)
 	return true
 
 func load_text_resource(path):
 	current_path = path
-	set_resource_viewer_props()
-	set_viewer_text(ResourceCompatLoader.resource_to_string(path))
+	set_highlight_type(HighlightType.GDRESOURCE)
+	set_viewer_text(ResourceCompatLoader.resource_file_to_string(path))
+	return true
+
+func load_text(path: String, text: String, type: HighlightType = HighlightType.UNKNOWN):
+	if type == HighlightType.UNKNOWN:
+		type = recognize(path)
+	current_path = path
+	set_highlight_type(type)
+	set_viewer_text(text)
 	return true
 
 func load_text_string(text):
 	current_path = ""
-	set_text_viewer_props()
+	set_highlight_type(HighlightType.TEXT)
 	set_viewer_text(text)
 	return true
 
@@ -314,9 +339,12 @@ func is_csharp_script(ext, p_type = ""):
 	return false
 
 func is_text(ext, p_type = ""):
-	if (ext == "txt" || ext == "xml" || ext == "csv" || ext == "html" || ext == "md" || ext == "yml" || ext == "yaml"):
+	if (ext == "txt" || ext == "csv" || ext == "html" || ext == "md" || ext == "yml" || ext == "yaml"):
 		return true
 	return false
+
+func is_xml(ext, p_type = ""):
+	return ext == "xml"
 
 func is_text_resource(ext, p_type = ""):
 	return ext == "tscn" || ext == "tres"
@@ -356,6 +384,8 @@ func recognize(path):
 		return HighlightType.INI_LIKE
 	elif (is_json(ext)):
 		return HighlightType.JSON_TEXT
+	elif (is_xml(ext)):
+		return HighlightType.XML
 	elif (is_text(ext)):
 		return HighlightType.TEXT
 	elif is_content_text(path):
@@ -363,7 +393,10 @@ func recognize(path):
 	return HighlightType.UNKNOWN
 
 func set_highlight_type(type: HighlightType):
-	match type:
+	if current_type == type:
+		return
+	current_type = type
+	match current_type:
 		HighlightType.GDSHADER:
 			set_shader_viewer_props()
 		HighlightType.GDSCRIPT:
@@ -376,6 +409,8 @@ func set_highlight_type(type: HighlightType):
 			set_resource_viewer_props()
 		HighlightType.JSON_TEXT:
 			set_json_viewer_props()
+		HighlightType.XML:
+			set_xml_viewer_props()
 		HighlightType.TEXT:
 			set_text_viewer_props()
 		_:
@@ -403,6 +438,7 @@ func set_common_code_viewer_props(is_code: bool):
 	CODE_VIEWER.gutters_draw_fold_gutter = is_code
 	CODE_VIEWER.gutters_draw_line_numbers = is_code
 	CODE_VIEWER.auto_brace_completion_highlight_matching = is_code
+	CODE_VIEWER.set_tab_size(GDREConfig.get_setting("Script/Indent/size"))
 
 
 func set_shader_viewer_props():
@@ -441,6 +477,16 @@ func set_json_viewer_props():
 	CODE_VIEWER.highlight_all_occurrences = true
 	CODE_VIEWER.highlight_current_line = true
 	CODE_VIEWER.draw_control_chars = true
+	CODE_VIEWER.draw_tabs = false
+	CODE_VIEWER.draw_spaces = false
+	CODE_VIEWER.delimiter_comments = []
+
+func set_xml_viewer_props():
+	CODE_VIEWER.syntax_highlighter = xml_highlighter
+	set_common_code_viewer_props(false)
+	CODE_VIEWER.highlight_all_occurrences = true
+	CODE_VIEWER.highlight_current_line = true
+	CODE_VIEWER.draw_control_chars = false
 	CODE_VIEWER.draw_tabs = false
 	CODE_VIEWER.draw_spaces = false
 	CODE_VIEWER.delimiter_comments = []

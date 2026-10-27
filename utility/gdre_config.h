@@ -32,6 +32,10 @@ public:
 	bool is_hidden() const;
 	Variant::Type get_type() const;
 	bool is_ephemeral() const;
+	virtual bool is_range_setting() const { return false; }
+	virtual Variant get_min_value() const;
+	virtual Variant get_max_value() const;
+	virtual Variant get_step_value() const;
 	virtual bool is_virtual_setting() const { return false; }
 	virtual bool is_filepicker() const { return false; }
 	virtual bool is_dirpicker() const { return false; }
@@ -54,15 +58,53 @@ protected:
 	GDREConfigSetting() {}
 };
 
+class GDREConfigSettingEnum : public GDREConfigSetting {
+	GDSOFTCLASS(GDREConfigSettingEnum, GDREConfigSetting);
+
+	Vector<String> enum_values;
+
+public:
+	GDREConfigSettingEnum(
+			const String &p_full_name,
+			const String &p_brief,
+			const String &p_description,
+			const int &p_default_value,
+			const String &p_enum_values,
+			bool p_hidden = false,
+			bool p_ephemeral = false);
+	virtual bool has_special_value() const override;
+	virtual Dictionary get_list_of_possible_values() const override;
+};
+
+class GDREConfigSettingRange : public GDREConfigSetting {
+	GDSOFTCLASS(GDREConfigSettingRange, GDREConfigSetting);
+
+	Variant min_value;
+	Variant max_value;
+	Variant step_value;
+
+public:
+	GDREConfigSettingRange(
+			const String &p_full_name,
+			const String &p_brief,
+			const String &p_description,
+			const Variant &p_default_value,
+			const String &p_range_string, bool p_hidden = false, bool p_ephemeral = false);
+	virtual Variant get_min_value() const override;
+	virtual Variant get_max_value() const override;
+	virtual Variant get_step_value() const override;
+	virtual bool is_range_setting() const override;
+};
+
 class GDREConfig : public Object {
 	GDCLASS(GDREConfig, Object);
 
 	ParallelFlatHashMap<String, Variant> settings;
 	static GDREConfig *singleton;
-	Vector<Ref<GDREConfigSetting>> default_settings;
+	HashMap<String, Ref<GDREConfigSetting>> default_settings;
 	ParallelFlatHashMap<String, Variant> ephemeral_settings;
 
-	static Vector<Ref<GDREConfigSetting>> _init_default_settings();
+	static HashMap<String, Ref<GDREConfigSetting>> _init_default_settings();
 
 	static String get_config_path();
 

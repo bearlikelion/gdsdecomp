@@ -4,7 +4,6 @@ extends GDREChildDialog
 const file_icon: Texture2D = preload("res://gdre_icons/gdre_File.svg")
 const file_ok: Texture2D = preload("res://gdre_icons/gdre_FileOk.svg")
 const file_broken: Texture2D = preload("res://gdre_icons/gdre_FileBroken.svg")
-const gdre_export_report = preload("res://gdre_export_report.tscn")
 const gdre_file_tree = preload("res://gdre_file_tree.gd")
 var arrow_right: Texture2D = get_theme_icon("arrow_collapsed", "Tree")
 var select_button: Texture2D = get_theme_icon("select_option", "Tree")
@@ -31,7 +30,6 @@ var DROP_FOLDERS_LIST_B: Tree = null
 var DROP_FOLDERS_LABEL_A: Label = null
 var DROP_FOLDERS_LABEL_B: Label = null
 var button_clicked_item: TreeItem = null
-# var isHiDPI = DisplayServer.screen_get_dpi() >= 240
 var root: TreeItem = null
 var userroot: TreeItem = null
 var num_files:int = 0
@@ -150,12 +148,6 @@ func _ready():
 	DROP_FOLDERS_LIST_B.set_column_title(0, "File")
 	DROP_FOLDERS_LIST_B.set_column_title(1, "Mapping")
 
-	if isHiDPI:
-		# get_viewport().size *= 2.0
-		# get_viewport().content_scale_factor = 2.0
-		#ThemeDB.fallback_base_scale = 2.0
-		self.content_scale_factor = 2.0
-		self.size *= 2.0
 	# This is a hack to get around not being able to open multiple scenes
 	# unless they're attached to windows
 	# The children are not already in the window for ease of GUI creation
@@ -400,7 +392,7 @@ func _on_save_pck_dialog_file_selected(path: String) -> void:
 	if (not _validate()):
 		popup_error_box("Validation failed", "Error")
 		return
-	self.call_on_next_process(func(): _do_save(path))
+	GDREMainLoop.call_on_next_process(func(): _do_save(path))
 
 func _do_save(path: String):
 	var file_map: Dictionary[String, String] = {}

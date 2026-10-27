@@ -31,10 +31,18 @@ BRANCHES_TO_MERGE=(
 	material-fix-deprecated-param
 	fix-pack-error
 	convert-3.x-escn
-	fix-svg
 	fix-compat-array-shapes
 	fix-diraccess-windows
-	gltf-fix-value-track-interpolation
+	fix-cli-parser
+	gltf-fix-skeleton-bone
+	gltf-fix-double-precision
+	gltf-fix-vertex-colors
+	fix-v3-meshes
+	fix-clearcoat-gloss
+	gltf-mutex-all-document-extensions
+	gltf-node-weights
+	gltf-clear-mipmaps-before-dupe
+	fix-mesh-index-3.x
 )
 
 # set fail on error
@@ -59,4 +67,5 @@ git push nikitalita $NEW_BRANCH_NAME --set-upstream
 
 # change the branch name in .github/workflows/all_builds.yml and the README.md
 sed_in_place "s/GODOT_MAIN_SYNC_REF: .*/GODOT_MAIN_SYNC_REF: $NEW_BRANCH_NAME/" "$GDRE_PATH/.github/workflows/all_builds.yml"
+sed_in_place "s/GODOT_MAIN_SYNC_REF = .*/GODOT_MAIN_SYNC_REF = \"$NEW_BRANCH_NAME\"/" "$GDRE_PATH/SCsub"
 sed_in_place "s/ @ branch \`.*\`/ @ branch \`$NEW_BRANCH_NAME\`/" "$GDRE_PATH/README.md"

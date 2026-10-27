@@ -12,6 +12,7 @@
 class ImportExporter;
 class ExportReport;
 struct EditorProgressGDDC;
+struct ProcessRunnerStruct;
 class ImportExporterReport : public RefCounted {
 	GDCLASS(ImportExporterReport, RefCounted)
 	friend class ImportExporter;
@@ -21,6 +22,7 @@ class ImportExporterReport : public RefCounted {
 	bool custom_version_detected = false;
 	bool exported_scenes = false;
 	bool show_headless_warning = false;
+	bool uses_double_precision = false;
 	int session_files_total = 0;
 	String gdre_version;
 	String game_name;
@@ -83,6 +85,7 @@ public:
 	bool is_steam_detected() const;
 	bool is_mono_detected() const;
 	bool is_custom_version_detected() const;
+	bool is_using_double_precision() const;
 
 	void print_report();
 	String get_gdre_version() const;
@@ -118,6 +121,7 @@ class ImportExporter : public RefCounted {
 	HashSet<String> textfile_extensions;
 	HashSet<String> other_file_extensions;
 	HashSet<String> valid_extensions;
+	std::shared_ptr<ProcessRunnerStruct> process_runner;
 
 	// for the cache file
 	struct FileInfo {
@@ -146,6 +150,10 @@ class ImportExporter : public RefCounted {
 	};
 
 	void update_exts();
+
+	String get_csharp_project_path() const;
+	Error decompile_csharp_scripts(const Vector<String> &cs_files, const HashSet<String> &files_to_export_set);
+	Error compile_csharp_scripts();
 
 	void save_filesystem_cache(const Vector<std::shared_ptr<FileInfo>> &reports, String output_dir);
 	Vector<std::shared_ptr<FileInfo>> read_filesystem_cache(const String &p_path);

@@ -5,19 +5,12 @@ var config: ConfigFile = null
 var last_error = ""
 var CONFIG_PATH = "user://gdre_settings.cfg"
 
-# var isHiDPI = DisplayServer.screen_get_dpi() >= 240
-var isHiDPI = false
-
-var gdre_recover = preload("res://gdre_recover.tscn")
-var gdre_new_pck = preload("res://gdre_new_pck.tscn")
-var gdre_patch_pck = preload("res://gdre_patch_pck.tscn")
 @onready var RECOVERY_DIALOG: GDRERecoverDialog = %GdreRecover
 @onready var NEW_PCK_DIALOG: GDRENewPck = %GdreNewPck
 @onready var PATCH_PCK_DIALOG: GDREPatchPCK = %GdrePatchPck
 var _file_dialog: Window = null
 var last_dir: String = ""
 var REAL_ROOT_WINDOW = null
-var deferred_calls = []
 var ret_code = 0
 # TODO: This is a hack to have the CLI mode work correctly; CLI parsing needs overhauling
 var had_main = false
@@ -117,7 +110,7 @@ func _on_new_pck_selected(pck_path: String):
 
 
 func _on_recovery_confirmed(files_to_extract: PackedStringArray, output_dir: String, extract_only: bool):
-	deferred_calls.append(func(): extract_and_recover(files_to_extract, output_dir, extract_only))
+	GDREMainLoop.call_on_next_process(func(): extract_and_recover(files_to_extract, output_dir, extract_only))
 
 func end_recovery():
 	GDRESettings.close_log_file()
@@ -210,13 +203,13 @@ func launch_patch_pck_window():
 
 func _on_recover_project_files_selected(paths: PackedStringArray):
 	close_recover_file_dialog()
-	deferred_calls.append(func(): launch_recovery_window(paths))
+	GDREMainLoop.call_on_next_process(func(): launch_recovery_window(paths))
 
 func _on_recover_project_dir_selected(path):
 	# just check if the dir path ends in ".app"
 	close_recover_file_dialog()
 	if path.ends_with(".app"):
-		deferred_calls.append(func(): launch_recovery_window([path]))
+		GDREMainLoop.call_on_next_process(func(): launch_recovery_window([path]))
 	else:
 		# pop up an accept dialog
 		popup_error_box("Invalid Selection!!", "Error")
@@ -249,14 +242,12 @@ func setup_file_dialog():
 	_file_dialog.set_use_native_dialog(true)
 	# This is currently broken in Godot, so we use the native dialogs
 	#var prev_size = _file_dialog.size
-	if isHiDPI:
-		_file_dialog.size *= 2.0
 	#_file_dialog.min_size = _file_dialog.size
 	#d_viewport.content_scale_factor = 2.0
 	_file_dialog.set_access(FileDialog.ACCESS_FILESYSTEM)
 	_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES #FileDialog.FILE_MODE_OPEN_FILE
 	#_file_dialog.filters = ["*"]
-	_file_dialog.filters = ["*.exe,*.bin,*.32,*.64,*.x86_64,*.x86,*.arm64,*.universal,*.pck,*.apk,*.app;Supported files"]
+	_file_dialog.filters = ["*.exe,*.bin,*.32,*.64,*.x86_64,*.x86,*.arm64,*.universal,*.zip,*.pck,*.apk,*.xapk,*.app;Supported files"]
 	#_file_dialog.filters = ["*.exe,*.bin,*.32,*.64,*.x86_64,*.x86,*.arm64,*.universal;Self contained executable files", "*.pck;PCK files", "*.apk;APK files", "*;All files"]
 	## TODO: remove this
 	_file_dialog.current_dir = GDRESettings.get_home_dir()
@@ -446,16 +437,6 @@ func _on_setenc_key_ok_pressed():
 	# get the current text in the line edit
 	var keytextbox = $SetEncryptionKeyWindow/VBoxContainer/KeyText
 	var key:String = keytextbox.text
-	if key.length() == 0:
-		GDRESettings.reset_encryption_key()
-	# set the key
-	else:
-		var err:int = GDRESettings.set_encryption_key_string(key)
-		if (err != OK):
-			keytextbox.text = ""
-			# pop up an accept dialog
-			$SetEncryptionKeyWindow.popup_error_box("Invalid key!\nKey must be a hex string with 64 characters", "Error")
-			return
 
 	if %EncryptionScriptPathText.text.length() > 0:
 		GDRESettings.get_recent_error_string()
@@ -465,6 +446,18 @@ func _on_setenc_key_ok_pressed():
 			return
 	else:
 		GDRESettings.reset_custom_decryptor()
+
+	if key.length() == 0:
+		GDRESettings.reset_encryption_key()
+	# set the key
+	else:
+		var err:int = GDRESettings.set_encryption_key_string(key)
+		if (err != OK):
+			keytextbox.text = ""
+			# pop up an accept dialog
+			$SetEncryptionKeyWindow.popup_error_box("Invalid key!\nKey must be a hex string with " + str(GDRESettings.get_required_key_size_in_bytes() * 2) + " characters", "Error")
+			return
+
 	# close the window
 	$SetEncryptionKeyWindow.hide()
 
@@ -549,38 +542,6 @@ func handle_quit(save_cfg = true):
 		GDRESettings.unload_project()
 
 
-	#readd_items($MenuContainer/REToolsMenu
-func _resize_menu_times(menu_container:HBoxContainer):
-	for menu_btn: MenuButton in menu_container.get_children():
-
-		var popup : PopupMenu = menu_btn.get_popup()
-		# broken
-		#popup.visible = true
-		#var size = popup.size * 2
-		#popup.size = size
-		#popup.min_size = size
-		#popup.max_size = size * 2
-		#popup.get_viewport().content_scale_factor = 2.0
-		#popup.visible = false
-		# readd_items(menu_btn)
-		if isHiDPI:
-			var old_theme = popup.theme
-			#menu_btn.connect("theme_changed", self._on_menu_btn_theme_changed)
-			var new_theme = old_theme
-			if !new_theme:
-				new_theme = Theme.new()
-			var font_size = new_theme.get_font_size("", "")
-			#new_theme.set_font_size("", "", font_size * 2)
-			new_theme.set_default_font_size(font_size * 2)
-			popup.theme = new_theme
-		var item_count = menu_btn.get_popup().get_item_count()
-		for i in range(item_count):
-			var icon: Texture2D = popup.get_item_icon(i)
-			if icon:
-				var icon_size = icon.get_size()
-				popup.set_item_icon_max_width(i, icon_size.x * (2.0 if isHiDPI else 0.5))
-
-
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_EXIT_TREE:
 		handle_quit()
@@ -603,8 +564,7 @@ func get_globs_files(globs: PackedStringArray) -> PackedStringArray:
 	return files
 
 func _process(_delta):
-	if deferred_calls.size() > 0:
-		deferred_calls.pop_front().call()
+	pass
 
 func _ready():
 	$version_lbl.text = GDRESettings.get_gdre_version()
@@ -636,16 +596,6 @@ func _ready():
 	$LegalNoticeWindow/OkButton.connect("pressed", $LegalNoticeWindow.hide)
 	$LegalNoticeWindow.connect("close_requested", $LegalNoticeWindow.hide)
 	%GdreRecover.connect("recovery_confirmed", self._on_recovery_confirmed)
-	# check if the current screen is hidpi
-	if isHiDPI:
-		# set the content scaling factor to 2x
-		ThemeDB.fallback_base_scale = 2.0
-		get_viewport().content_scale_factor = 2.0
-		get_viewport().size *= 2
-		$SetEncryptionKeyWindow.content_scale_factor = 2.0
-		$SetEncryptionKeyWindow.size *= 2
-		$LegalNoticeWindow.content_scale_factor = 2.0
-		$LegalNoticeWindow.size *=2
 
 	if show_disclaimer:
 		open_about_window()
@@ -732,8 +682,10 @@ var MAIN_CMD_NOTES = """Main commands:
 --patch-translations=<CSV_FILE>=<SRC_PATH>    Patch translations with the specified CSV file and source path
                                                 (e.g. "/path/to/translation.csv=res://translations/translation.csv") (can be repeated)
 --setting=<SETTING_NAME>=<VALUE>   Set a configuration value for this session (can be repeated)
---gdre-help                        Print the help message and exit
---gdre-version                     Print the version of GDRE tools and exit
+--godot-version                    Print the version of Godot engine and exit
+--godot-help                       Print the help message of Godot engine and exit
+--help, --gdre-help                Print this help message and exit
+--version, --gdre-version          Print this version of GDRE tools and exit
 """
 
 var GLOB_NOTES = """Notes on Include/Exclude globs:
@@ -907,10 +859,6 @@ func recovery(  input_files:PackedStringArray,
 			return 1
 		if input_file.get_extension().to_lower() == "app":
 			is_dir = false
-		elif !da.dir_exists(input_file.path_join(".import")) && !da.dir_exists(input_file.path_join(".godot")):
-			print_usage()
-			print("Error: " + input_file + " does not appear to be a project directory")
-			return 1
 		else:
 			parent_dir = input_file
 			is_dir = true
@@ -930,8 +878,10 @@ func recovery(  input_files:PackedStringArray,
 
 	err = GDRESettings.load_project(input_files, extract_only, csharp_assembly)
 	if (err != OK):
-		print_usage()
-		print("Error: failed to open ", (GDRECommon.get_files_for_paths(input_files)))
+		var error_msg = GDRESettings.get_recent_error_string()
+		if error_msg.to_lower().contains("encrypt"):
+			error_msg = "Incorrect encryption key. Please set the correct key and try again."
+		print("\nError: Failed to open " + str(GDRECommon.get_files_for_paths(input_files)) + ":\n" + error_msg)
 		return 1
 
 	print("Successfully loaded PCK!")
@@ -1001,18 +951,10 @@ func recovery(  input_files:PackedStringArray,
 			print("Error: failed to clear output directory except for git")
 			return 1
 
-	if is_dir:
-		if extract_only:
-			print("Why did you open a folder to extract it??? What's wrong with you?!!?")
-			return 1
-		if output_dir.simplify_path() != input_file.simplify_path() and GDRECommon.copy_dir(input_file, output_dir) != OK:
-			print("Error: failed to copy " + input_file + " to " + output_dir)
-			return 1
-	else:
-		err = dump_files(output_dir, files, ignore_checksum_errors, skip_md5)
-		if (err != OK):
-			print("Error: failed to extract PAK file, not exporting assets")
-			return 1
+	err = dump_files(output_dir, files, ignore_checksum_errors, skip_md5)
+	if (err != OK):
+		print("Error: failed to extract PAK file, not exporting assets")
+		return 1
 	var end_time;
 	var secs_taken;
 	if (extract_only):
@@ -1246,6 +1188,7 @@ func decompile(files: PackedStringArray, bytecode_version: String, output_dir: S
 
 func get_sanitized_args():
 	var args = OS.get_cmdline_args()
+	args.append_array(OS.get_cmdline_user_args())
 	#var scene_path = get_tree().root.scene_file_path
 	var scene_path = "res://gdre_main.tscn"
 
@@ -1451,6 +1394,9 @@ func split_map_arg(arg: String) -> PackedStringArray:
 		return []
 	return patch_files
 
+func get_bool_arg(arg: String) -> bool:
+	var val = get_arg_value(arg).to_lower()
+	return val == "true" or val == "1" or val == "yes" or val == "on" or val == "y"
 
 func handle_cli(args: PackedStringArray) -> bool:
 	var custom_bytecode_file: String = ""
@@ -1481,7 +1427,15 @@ func handle_cli(args: PackedStringArray) -> bool:
 	var locales_to_patch: PackedStringArray = []
 	var test_recovery: bool = false
 	var test_output_dir: String = ""
+	var clear_plugin_cache: bool = false
+	var clear_static_cache: bool = false
+	var clear_download_cache: bool = false
 	if (args.size() == 0):
+		if GDRESettings.is_headless():
+			print_usage()
+			print("ERROR: no command specified")
+			ret_code = 1
+			return true
 		return false
 	var any_commands = false
 	for i in range(args.size()):
@@ -1523,6 +1477,7 @@ func handle_cli(args: PackedStringArray) -> bool:
 			scripts_only = true
 		elif arg.begins_with("--key"):
 			enc_key = get_arg_value(arg)
+			set_setting = true
 		elif arg.begins_with("--custom-decryption-script"):
 			var decryptor_script_path = get_cli_abs_path(get_arg_value(arg))
 			if decryptor_script_path.is_empty():
@@ -1541,6 +1496,20 @@ func handle_cli(args: PackedStringArray) -> bool:
 				print("Error: failed to set custom encryption script: " + decryptor_script_path)
 				ret_code = 1
 				return true
+			set_setting = true
+		elif arg.begins_with("--custom-pack-source-script"):
+			var pack_source_script_path = get_cli_abs_path(get_arg_value(arg))
+			if pack_source_script_path.is_empty():
+				print_usage()
+				print("Error: path is required for --custom-pack-source-script")
+				ret_code = 1
+				return true
+			if GDRESettings.add_custom_pack_source_script(pack_source_script_path) != OK:
+				print_usage()
+				print("Error: failed to set custom pack source script: " + pack_source_script_path)
+				ret_code = 1
+				return true
+			set_setting = true
 		elif arg.begins_with("--ignore-checksum-errors"):
 			ignore_md5 = true
 		elif arg.begins_with("--skip-checksum-check"):
@@ -1550,8 +1519,7 @@ func handle_cli(args: PackedStringArray) -> bool:
 		elif arg.begins_with("--disable-multithreading"):
 			var val: bool = true
 			if arg.contains("="):
-				var str_val = get_arg_value(arg).to_lower()
-				val = str_val == "true" or str_val == "1" or str_val == "yes" or str_val == "on" or str_val == "y"
+				val = get_bool_arg(arg)
 			GDREConfig.set_setting("force_single_threaded", val, true)
 			set_setting = true
 		elif arg.begins_with("--enable-experimental-plugin-downloading"):
@@ -1608,6 +1576,17 @@ func handle_cli(args: PackedStringArray) -> bool:
 		elif arg.begins_with("--print-plugin-cache"):
 			print_plugin_cache()
 			return true
+		elif arg == "--clear-plugin-cache":
+			clear_plugin_cache = true
+			set_setting = true
+		elif arg == "--clear-plugin-cache-including-static":
+			clear_static_cache = true
+			clear_plugin_cache = true
+			set_setting = true
+		elif arg == "--clear-download-cache":
+			clear_download_cache = true
+			set_setting = true
+
 		elif arg.begins_with("--plcache"):
 			main_cmds["plcache"] = true
 			prepop.append(get_arg_value(arg))
@@ -1671,6 +1650,8 @@ func handle_cli(args: PackedStringArray) -> bool:
 			test_recovery = true
 			if arg.contains("="):
 				test_output_dir = get_cli_abs_path(get_arg_value(arg))
+		elif !arg.begins_with("--"):
+			pass
 		else:
 			print_usage()
 			print("ERROR: invalid option '" + arg + "'")
@@ -1688,27 +1669,61 @@ func handle_cli(args: PackedStringArray) -> bool:
 		ret_code = 1
 		return true
 
-	if set_setting and main_cmds.size() == 0:
+	if clear_plugin_cache:
+		PluginManager.clear_plugin_cache(clear_static_cache)
+	if clear_download_cache:
+		PluginManager.clear_download_cache()
+
+	if main_cmds.size() == 0:
+		if (GDRESettings.is_headless() or not set_setting):
+			print_usage()
+			print("ERROR: no command specified")
+			ret_code = 1
+			return true
+		if !enc_key.is_empty():
+			if GDRESettings.set_encryption_key_string(enc_key) != OK:
+				print_usage()
+				print("Invalid key! Key must be a hex string with 64 characters")
+				ret_code = 1
+				return true
 		return false
 
 	had_main = true
-	deferred_calls.push_back(func():
+	GDREMainLoop.call_on_next_process(func():
 		if prepop.size() > 0:
-			var start_time = Time.get_ticks_msec()
-			var err = PluginManager.prepop_cache(prepop)
-			if err != OK:
-				print("Error: failed to prepop plugin cache: " + str(err))
+			var output_path = output_dir
+			if output_path.is_empty():
+				print("Error: --output is required for --plcache")
 				ret_code = 1
-			var end_time = Time.get_ticks_msec()
-			var secs_taken = (end_time - start_time) / 1000
-			print("Prepop complete in %02dm%02ds" % [(secs_taken) / 60, (secs_taken) % 60])
+				return true
+			else:
+				var start_time = Time.get_ticks_msec()
+				var err = PluginManager.prepop_cache(prepop, output_path)
+				if err != OK:
+					print("Error: failed to prepop plugin cache: " + str(err))
+					ret_code = 1
+				var end_time = Time.get_ticks_msec()
+				var secs_taken = (end_time - start_time) / 1000
+				print("Prepop complete in %02dm%02ds" % [(secs_taken) / 60, (secs_taken) % 60])
 		elif main_cmds.has("list-files"):
+			if !enc_key.is_empty():
+				if GDRESettings.set_encryption_key_string(enc_key) != OK:
+					print_usage()
+					print("Invalid key! Key must be a hex string with 64 characters")
+					ret_code = 1
+					return true
 			ret_code = list_files(input_file)
 		elif compile_files.size() > 0:
 			ret_code = compile(compile_files, bytecode_version, output_dir)
 		elif decompile_files.size() > 0:
 			ret_code = decompile(decompile_files, bytecode_version, output_dir, enc_key)
 		elif not pck_patch_pck.is_empty():
+			if !enc_key.is_empty():
+				if GDRESettings.set_encryption_key_string(enc_key) != OK:
+					print_usage()
+					print("Invalid key! Key must be a hex string with 64 characters")
+					ret_code = 1
+					return true
 			if patch_translations.size() > 0:
 				var tmp_dir = GDRESettings.get_gdre_user_path().path_join(".tmp_translations")
 				if DirAccess.dir_exists_absolute(tmp_dir):
@@ -1726,6 +1741,12 @@ func handle_cli(args: PackedStringArray) -> bool:
 			if ret_code != 0:
 				return
 		elif patch_translations.size() > 0:
+			if !enc_key.is_empty():
+				if GDRESettings.set_encryption_key_string(enc_key) != OK:
+					print_usage()
+					print("Invalid key! Key must be a hex string with 64 characters")
+					ret_code = 1
+					return true
 			var rmap = {}
 			ret_code = patch_translations(input_file, patch_translations, output_dir, locales_to_patch, rmap)
 		elif not input_file.is_empty():

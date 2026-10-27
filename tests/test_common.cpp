@@ -1,6 +1,59 @@
 #include "test_common.h"
 #include "core/os/main_loop.h"
+#include "main/gdre_main_loop.h"
 #include "servers/audio/audio_server.h"
+#include <utility/gdre_settings.h>
+
+#include "compat/resource_loader_compat.h"
+
+TEST_FORCE_LINK(test_common)
+
+String get_gdsdecomp_path() {
+	REQUIRE(GDRESettings::get_singleton());
+	return GDRESettings::get_singleton()->get_cwd().path_join("modules/gdsdecomp");
+}
+
+String get_tmp_path() {
+	return get_gdsdecomp_path().path_join(".tmp");
+}
+
+String get_test_resources_path() {
+	return get_gdsdecomp_path().path_join("tests/test_files");
+}
+
+String get_test_scripts_path() {
+	return get_gdsdecomp_path().path_join("tests/test_scripts");
+}
+
+String get_gdscript_tests_path() {
+	REQUIRE(GDRESettings::get_singleton());
+	return GDRESettings::get_singleton()->get_cwd().path_join("modules/gdscript/tests/scripts");
+}
+
+String get_gdsdecomp_helpers_path() {
+	return get_gdsdecomp_path().path_join("helpers");
+}
+
+Vector<String> get_test_versions() {
+	Vector<String> versions;
+	Ref<DirAccess> da = DirAccess::open(get_test_resources_path());
+	da->list_dir_begin();
+	while (true) {
+		String file = da->get_next();
+		if (file.is_empty()) {
+			break;
+		}
+		if (file == "." || file == "..") {
+			continue;
+		}
+
+		if (da->current_is_dir()) {
+			versions.push_back(file);
+		}
+	}
+	return versions;
+}
+
 #ifndef XR_DISABLED
 #include "servers/xr/xr_server.h"
 #endif // XR_DISABLED
@@ -28,6 +81,7 @@
 #include "platform/ios/os_ios.h"
 #define PLATFORM_OS OS_IOS
 #endif
+
 class GDRETestOS : public PLATFORM_OS {
 	static_assert(std::is_base_of<OS, PLATFORM_OS>::value, "T must derive from OS");
 
@@ -58,32 +112,29 @@ public:
 	}
 
 	void test_case_start(const doctest::TestCaseData &p_in) override {
+		ResourceCompatLoader::_init();
 		String name = String(p_in.m_name);
 		String suite_name = String(p_in.m_test_suite);
-
-		GDRESettings::set_is_testing(true);
-		if (name.contains("[ProjectRecovery]") || name.contains("[ResourceExport]")) {
+		if (name.contains("[ProjectRecovery]") || name.contains("[FakeScript]")) {
+#ifndef XR_DISABLED
+			xr_server = memnew(XRServer);
+			CHECK(xr_server != nullptr);
+			CHECK(xr_server->get_xr_mode() == XRServer::XRMODE_OFF);
+#endif // XR_DISABLED
+		}
+		if (name.contains("[ProjectRecovery]") || name.contains("[ResourceExport]") || name.contains("[FakeScript]")) {
+			main_loop = memnew(MainLoop);
+			set_main_loop(main_loop);
+			GDREMainLoop::set_is_testing(true);
 			int dummy_idx = AudioDriverManager::get_driver_count() - 1;
 			AudioDriverManager::initialize(dummy_idx);
 			AudioServer *audio_server = memnew(AudioServer);
 			audio_server->init();
 			return;
 		}
-		if (name.contains("[ProjectRecovery]")) {
-#ifndef XR_DISABLED
-			xr_server = memnew(XRServer);
-			CHECK(xr_server != nullptr);
-			CHECK(xr_server->get_xr_mode() == XRServer::XRMODE_OFF);
-#endif // XR_DISABLED
-
-			main_loop = memnew(MainLoop);
-
-			set_main_loop(main_loop);
-		}
 	}
 
 	void test_case_end(const doctest::CurrentTestCaseStats &) override {
-		GDRESettings::set_is_testing(false);
 #ifndef XR_DISABLED
 		if (XRServer::get_singleton() && XRServer::get_singleton() == xr_server) {
 			memdelete(xr_server);
@@ -102,6 +153,7 @@ public:
 			AudioServer::get_singleton()->finish();
 			memdelete(AudioServer::get_singleton());
 		}
+		ResourceCompatLoader::_deinit();
 	}
 
 	void test_run_start() override {

@@ -46,9 +46,12 @@
 #include "core/io/resource_format_binary.h"
 
 #include "compat/image_parser_v2.h"
+#include "utility/common.h"
 #include "utility/file_access_buffer.h"
 #include "utility/gdre_settings.h"
 #include "utility/resource_info.h"
+
+#include "resource_compat_obdb.h"
 
 //#define print_bl(m_what) print_line(m_what)
 #define print_bl(m_what) (void)(m_what)
@@ -952,7 +955,6 @@ Error ResourceLoaderCompatBinary::load() {
 			}
 
 			if (is_scene && name == "_bundled") {
-				Dictionary _bundled = res->get("_bundled");
 				if (!main) {
 					// ??????
 					// WARN_PRINT("PackedScene found in non-main resource?!!??!?!?!");
@@ -961,10 +963,10 @@ Error ResourceLoaderCompatBinary::load() {
 					if (!compat.is_valid()) {
 						compat.instantiate();
 					}
-					compat->packed_scene_version = (int)_bundled.get("version", -1);
+					compat->packed_scene_version = (int)value.operator Dictionary().get("version", 1);
 					compat->set_on_resource(res);
-				} else if (_bundled.has("version")) {
-					packed_scene_version = (int)_bundled.get("version", -1);
+				} else {
+					packed_scene_version = (int)value.operator Dictionary().get("version", 1);
 				}
 			}
 
@@ -975,12 +977,16 @@ Error ResourceLoaderCompatBinary::load() {
 				bool valid = false;
 				res->set(name, value, &valid);
 				if (!valid) {
-					missing_resource_properties[name] = value;
+					if (!CompatFormatLoader::try_force_set_property(res, name, value)) {
+						missing_resource_properties[name] = value;
 #ifdef DEBUG_ENABLED
-					if (ver_major < GODOT_VERSION_MAJOR) {
-						WARN_PRINT(vformat("Failed to set deprecated %d.%d property '%s' (type: %s) on res class '%s' (remap: %s)", ver_major, ver_minor, name, Variant::get_type_name(value.get_type()), t, res->get_class()));
-					}
+						if (ver_major < GODOT_VERSION_MAJOR) {
+							WARN_PRINT(vformat("Failed to set deprecated %d.%d property '%s' (type: %s) on res class '%s' (remap: %s)", ver_major, ver_minor, name, Variant::get_type_name(value.get_type()), t, res->get_class()));
+						}
 #endif
+					} else {
+						valid = true;
+					}
 				}
 			}
 		}
@@ -1045,10 +1051,6 @@ Error ResourceLoaderCompatBinary::load() {
 			}
 			f.unref();
 			resource = res;
-			if (res->get_save_class() == "PackedScene") {
-				Dictionary _bundled = res->get("_bundled");
-				packed_scene_version = _bundled.get("version", -1);
-			}
 			// skip translation remapping for fake and non-global loads
 			if (is_real_load()) {
 				resource->set_as_translation_remapped(translation_remapped);
@@ -1196,7 +1198,6 @@ void ResourceLoaderCompatBinary::open(Ref<FileAccess> p_f, bool p_no_resources, 
 	}
 
 	type = get_unicode_string();
-
 	print_bl("type: " + type);
 	md_at = f->get_position();
 	importmd_ofs = f->get_64();
@@ -1208,9 +1209,11 @@ void ResourceLoaderCompatBinary::open(Ref<FileAccess> p_f, bool p_no_resources, 
 		using_uids = true;
 	}
 	f->real_is_double = (flags & ResourceFormatSaverBinaryInstance::FORMAT_FLAG_REAL_T_IS_DOUBLE) != 0;
+#if !REAL_T_IS_DOUBLE
 	if (f->real_is_double) {
 		WARN_PRINT_ONCE("ResourceLoaderCompatBinary: Real type is double, this is not unsupported in this version of GDRE tools.");
 	}
+#endif
 	using_real_t_double = f->real_is_double;
 
 	if (using_uids) {
@@ -2110,21 +2113,20 @@ void ResourceFormatSaverCompatBinaryInstance::write_variant(Ref<FileAccess> f, c
 		} break;
 		case Variant::OBJECT: {
 			// This will only be triggered on godot 2.x, where the image variant is loaded as an image object vs. a resource
-			if (ver_format <= 1) {
-				Ref<Resource> resp = p_property;
-				if (resp->is_class("Image")) {
+			Ref<Resource> res = p_property;
+			if (ver_format <= 1 && res.is_valid()) {
+				if (res->is_class("Image")) {
 					f->store_32(VARIANT_IMAGE);
 					// storing lossless compressed by default
 					ImageParserV2::write_image_v2_to_bin(f, p_property, true);
 					break;
-				} else if (resp->is_class("InputEvent")) {
+				} else if (res->is_class("InputEvent")) {
 					// these should never be saved to binary; just store the type
 					f->store_32(VARIANT_INPUT_EVENT);
 					break;
 				}
 			}
 			f->store_32(VARIANT_OBJECT);
-			Ref<Resource> res = p_property;
 			if (res.is_null() || res->get_meta(SNAME("_skip_save_"), false)) {
 				f->store_32(OBJECT_EMPTY);
 				return; // Don't save it.
@@ -2430,15 +2432,11 @@ static String _resource_get_class(Ref<Resource> p_resource) {
 
 /* this is really only appropriate for saving fake-loaded resources right now; don't use it to save anything else*/
 Error ResourceFormatSaverCompatBinaryInstance::save(const String &p_path, const Ref<Resource> &p_resource, uint32_t p_flags) {
-	// Resource::seed_scene_unique_id(p_path.hash());
-	// get metadata from the resource
-
 	Error err;
 
 	path = get_local_path(p_path, p_resource);
 
 	set_save_settings(p_resource, p_flags);
-	ResourceUID::ID uid = res_uid;
 
 	Ref<FileAccess> f;
 	using_compression = using_compression || p_flags & ResourceSaver::FLAG_COMPRESS;
@@ -2457,6 +2455,21 @@ Error ResourceFormatSaverCompatBinaryInstance::save(const String &p_path, const 
 	}
 
 	ERR_FAIL_COND_V_MSG(err != OK, err, "Cannot create file '" + p_path + "'.");
+	return save_to_file(f, p_path, p_resource, p_flags);
+}
+
+Error ResourceFormatSaverCompatBinaryInstance::save_to_file(const Ref<FileAccess> &p_f, const String &p_path, const Ref<Resource> &p_resource, uint32_t p_flags) {
+	path = get_local_path(p_path, p_resource);
+
+	set_save_settings(p_resource, p_flags);
+	return _save_to_file(p_f, p_path, p_resource, p_flags);
+}
+
+Error ResourceFormatSaverCompatBinaryInstance::_save_to_file(const Ref<FileAccess> &p_f, const String &p_path, const Ref<Resource> &p_resource, uint32_t p_flags) {
+	// Resource::seed_scene_unique_id(p_path.hash());
+
+	Ref<FileAccess> f = p_f;
+	ResourceUID::ID uid = res_uid;
 
 	if (using_real_t_double) {
 		f->real_is_double = true;
@@ -2731,14 +2744,7 @@ Error ResourceFormatSaverCompatBinaryInstance::save(const String &p_path, const 
 			if (p.pi.name == "_bundled") {
 				// If this is a real PackedScene (vs. a MissingResource), we may need to fix the format
 				if (rd.type == "PackedScene" && saved_resources.get(i)->get_class() == "PackedScene") {
-					Dictionary bundled = p.value;
-					int packed_scene_version = bundled.get("version", -1);
-					Ref<ResourceInfo> ri = ResourceInfo::get_info_from_resource(saved_resources.get(i));
-					int original_scene_version = ri.is_valid() ? ri->packed_scene_version : -1;
-					if (original_scene_version < 0 || original_scene_version != packed_scene_version) {
-						value = fix_scene_bundle(saved_resources.get(i), original_scene_version);
-						// we have to fix this
-					}
+					value = fix_scene_bundle_format(saved_resources.get(i));
 				}
 			}
 			f->store_32(uint32_t(p.name_idx));
@@ -3323,33 +3329,58 @@ Error ResourceFormatLoaderCompatBinary::rewrite_v2_import_metadata(const String 
 	return da->rename(dest, p_dst);
 }
 
-struct ConnectionData {
-	int from = 0;
-	int to = 0;
-	int signal = 0;
-	int method = 0;
-	int flags = 0;
-	int unbinds = 0;
-	Vector<int> binds;
-};
-
-Dictionary ResourceFormatSaverCompatBinaryInstance::fix_scene_bundle(const Ref<PackedScene> &p_scene, int original_version) {
+Dictionary ResourceFormatSaverCompatBinaryInstance::fix_scene_bundle_format(const Ref<PackedScene> &p_scene) {
 	Dictionary bundled = p_scene->get("_bundled");
-	int ver = bundled.get("version", -1);
+	int ver = bundled.get("version", 1);
 	if (ver > ResourceFormatLoaderCompatBinary::CURRENT_PACKED_SCENE_VERSION) {
 		ERR_FAIL_V_MSG(bundled, "THEY INCREASED THE PACKED SCENE VERSION AGAIN!!!!!! REPORT THIS!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 	}
-
-	int conn_count = p_scene->get_state()->get_connection_count();
-	bool requires_version_3 = false;
-	for (int i = 0; i < conn_count; i++) {
-		if (p_scene->get_state()->get_connection_unbinds(i) > 0) {
-			requires_version_3 = true;
-			break;
+	Ref<ResourceInfo> ri = ResourceInfo::get_info_from_resource(p_scene);
+	int original_version = ri.is_valid() ? ri->packed_scene_version : -1;
+	if (original_version < 0) {
+		switch (ver_major) {
+			case 0:
+			case 1:
+				original_version = 1;
+				break;
+			case 2:
+			case 3:
+				original_version = 2;
+				break;
+			case 4:
+			default:
+				original_version = ResourceFormatLoaderCompatBinary::CURRENT_PACKED_SCENE_VERSION;
+				break;
 		}
 	}
-	if (requires_version_3) {
+
+	if (original_version == ver) {
 		return bundled;
+	}
+
+	int conn_count = p_scene->get_state()->get_connection_count();
+	for (int i = 0; i < conn_count; i++) {
+		if (p_scene->get_state()->get_connection_unbinds(i) > 0) {
+			// Requires version 3, we can't fix this, return the original bundled dictionary
+			WARN_PRINT_DEBUG_COND(original_version < 3, vformat("Non-v3 scene bundle '%s' has unbinds. This is not supported.", p_scene->get_path()));
+			return bundled;
+		}
+	}
+	int new_version = original_version; // default to 1
+	if (new_version == 1) {
+		static Vector<String> non_v1_keys = { "node_paths", "editable_instances", "base_scene" };
+		for (auto &key : non_v1_keys) {
+			if (bundled.has(key) && bundled[key].get_type() != Variant::NIL) {
+				auto &value = bundled[key];
+				if (value.get_type() == Variant::ARRAY && value.operator Array().size() > 0) {
+					WARN_PRINT_DEBUG_COND(original_version == 1, vformat("Non-v1 scene bundle '%s' has non-empty %s array. This is not supported.", p_scene->get_path(), key));
+					new_version = 2;
+				} else if (value.get_type() == Variant::INT && value.operator int64_t() >= 0) {
+					WARN_PRINT_DEBUG_COND(original_version == 1, vformat("Non-v1 scene bundle '%s' has base_scene index. This is not supported.", p_scene->get_path()));
+					new_version = 2;
+				}
+			}
+		}
 	}
 	Dictionary ret = bundled.duplicate(true);
 	PackedInt32Array conns = ret["conns"];
@@ -3372,7 +3403,12 @@ Dictionary ResourceFormatSaverCompatBinaryInstance::fix_scene_bundle(const Ref<P
 		idx++;
 	}
 	ret["conns"] = newconns;
-	ret["version"] = original_version > 0 ? original_version : 2; // default to 2
+	ret["version"] = new_version;
+	if (new_version == 1) {
+		ret.erase("node_paths");
+		ret.erase("editable_instances");
+		ret.erase("base_scene");
+	}
 
 	return ret;
 }
@@ -3488,6 +3524,10 @@ Error ResourceFormatLoaderCompatBinary::get_ver_major_minor(const String &p_path
 	if (err != OK || !f.is_valid()) {
 		return err != OK ? err : ERR_FILE_CANT_OPEN;
 	}
+	// Hack necessary for version detection when loading a project from non-pck
+	if (ResourceFormatLoaderCompatOBDB::is_obdb_resource_file(f)) {
+		return ResourceFormatLoaderCompatOBDB::get_ver_major_minor_file(f, r_ver_major, r_ver_minor, r_suspicious);
+	}
 	ResourceLoaderCompatBinary loader;
 	return loader.get_ver_major_minor(f, r_ver_major, r_ver_minor, r_suspicious) ? OK : loader.error;
 }
@@ -3513,9 +3553,6 @@ Error ResourceFormatSaverCompatBinaryInstance::set_save_settings(const Ref<Resou
 			ver_format = compat->ver_format;
 			ver_major = compat->ver_major;
 			ver_minor = compat->ver_minor;
-		}
-		if (ver_major == 0) {
-			WARN_PRINT("Resource has a major version of 0, this is not supported.");
 		}
 		String format = compat->resource_format;
 		script_class = compat->script_class;
@@ -3632,7 +3669,7 @@ int ResourceFormatSaverCompatBinary::get_ver_minor_from_format_version(int ver_f
 }
 
 Error ResourceFormatSaverCompatBinary::save_custom(const Ref<Resource> &p_resource, const String &p_path, int ver_format, int ver_major, int ver_minor, uint32_t p_flags) {
-	ERR_FAIL_COND_V_MSG(ver_format <= 0 || ver_major <= 0, ERR_INVALID_PARAMETER, "Invalid version info");
+	ERR_FAIL_COND_V_MSG(ver_format < 0 || ver_major < 0, ERR_INVALID_PARAMETER, "Invalid version info");
 
 	p_flags = CompatFormatLoader::set_version_info_in_flags(p_flags, ver_format, ver_major, ver_minor);
 	return ResourceFormatSaverCompatBinary::save(p_resource, p_path, p_flags);
@@ -3649,10 +3686,11 @@ String ResourceFormatSaverCompatBinaryInstance::get_local_path(const String &p_p
 	return p_resource.is_valid() ? p_resource->get_path() : "";
 }
 
-Error ResourceFormatLoaderCompatBinary::test_writing_parsing_variant(Variant p_v, Variant &r_v, int ver_major, int ver_minor) {
+Error ResourceFormatLoaderCompatBinary::test_writing_parsing_variant(Variant p_v, Variant &r_v, int ver_major, int ver_minor, bool using_real_t_double) {
 	ResourceFormatSaverCompatBinaryInstance saver;
 	int format = ResourceFormatSaverCompatBinary::get_default_format_version(ver_major, ver_minor);
 	auto fa = FileAccessBuffer::create();
+	fa->real_is_double = using_real_t_double;
 	saver.ver_format = format;
 	saver.ver_major = ver_major;
 	saver.ver_minor = ver_minor;
@@ -3675,6 +3713,7 @@ Error ResourceFormatLoaderCompatBinary::test_writing_parsing_variant(Variant p_v
 	loader.ver_major = ver_major;
 	loader.ver_minor = ver_minor;
 	loader.using_named_scene_ids = false;
+	loader.using_real_t_double = using_real_t_double;
 	for (const auto &[k, v] : resource_map) {
 		loader.internal_index_cache["::" + itos(v)] = k;
 	}

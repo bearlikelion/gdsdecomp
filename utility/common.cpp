@@ -2,14 +2,13 @@
 #include "bytecode/bytecode_base.h"
 #include "compat/file_access_encrypted_v3.h"
 #include "compat/variant_decoder_compat.h"
-#include "utility/file_access_buffer.h"
 #include "utility/glob.h"
 
 #include "core/error/error_list.h"
 #include "core/error/error_macros.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
-#include "core/io/http_client.h"
+#include "core/io/image_loader.h"
 #include "core/object/class_db.h"
 #include "modules/regex/regex.h"
 #include "modules/zip/zip_reader.h"
@@ -23,9 +22,8 @@ struct RecursiveListDirTaskData {
 	const bool absolute;
 	const Vector<String> excludes;
 	const Vector<String> banned_files;
-	const bool include_hidden;
-	const bool files_first;
 	const bool exclude_dot_prefix_and_gdignore;
+	const bool files_first;
 	const bool show_progress;
 
 	struct Token {
@@ -82,7 +80,7 @@ struct RecursiveListDirTaskData {
 		Vector<String> files;
 
 		String base = absolute ? dir : "";
-		da->set_include_hidden(include_hidden);
+		da->set_include_hidden(true);
 		da->list_dir_begin();
 		String f = da->get_next();
 		while (!f.is_empty()) {
@@ -179,30 +177,19 @@ Vector<String> gdre::get_recursive_dir_list_multithread(
 		const String &dir,
 		const Vector<String> &wildcards,
 		bool absolute,
-		bool include_hidden,
-		const Vector<String> &p_exclude_filters,
-		bool files_first,
 		bool exclude_dot_prefix_and_gdignore,
+		const Vector<String> &p_exclude_filters,
+		const Vector<String> &p_banned_files,
+		bool files_first,
 		bool show_progress) {
-	Vector<String> banned_files;
-	Vector<String> exclude_filters;
-	for (auto &wc : p_exclude_filters) {
-		// if the wildcard starts with '*/' and has no '/' following it, then it is a banned file
-		if (wc.begins_with("*/") && wc.substr(2).find("/") == -1) {
-			banned_files.push_back(wc.trim_prefix("*/"));
-		} else {
-			exclude_filters.push_back(wc);
-		}
-	}
 	RecursiveListDirTaskData task_data{
 		dir,
 		wildcards,
 		absolute,
-		exclude_filters,
-		banned_files,
-		include_hidden,
-		files_first,
+		p_exclude_filters,
+		p_banned_files,
 		exclude_dot_prefix_and_gdignore,
+		files_first,
 		show_progress
 	};
 	return task_data.run();
@@ -406,7 +393,12 @@ Error gdre::unzip_file_to_dir(const String &zip_path, const String &output_dir) 
 	auto files = zip->get_files();
 	for (int i = 0; i < files.size(); i++) {
 		auto file = files[i];
+		int errors_before = GDRELogger::get_thread_error_count();
 		auto data = zip->read_file(file, true);
+		int errors_after = GDRELogger::get_thread_error_count();
+		if (errors_after > errors_before) {
+			ERR_FAIL_V_MSG(ERR_FILE_CANT_READ, vformat("Error reading file %s in %s", file, zip_path));
+		}
 		if (data.size() == 0) {
 			continue;
 		}
@@ -491,414 +483,6 @@ String gdre::get_md5_for_dir(const String &dir, bool ignore_code_signature) {
 	// sort the files
 	files.sort();
 	return FileAccess::get_multiple_md5(files);
-}
-
-namespace {
-Error _wget_sync(const String &p_url, Ref<FileAccess> response, int retries, const Vector<String> &extra_headers, float *p_progress, bool *p_cancelled, int64_t *r_size) {
-#define WGET_CANCELLED_CHECK()         \
-	if (p_cancelled && *p_cancelled) { \
-		return ERR_SKIP;               \
-	}
-	WGET_CANCELLED_CHECK();
-	Ref<HTTPClient> client = HTTPClient::create();
-	client->set_blocking_mode(true);
-	Error err;
-	String request_url = p_url;
-	auto connect_to_host_and_request = [&](const String &url) {
-		WGET_CANCELLED_CHECK();
-		bool is_https = url.begins_with("https://");
-		String host = url.get_slice("://", 1).get_slice("/", 0);
-		String thingy = (is_https ? "https://" : "http://") + host;
-		Error connect_err = client->connect_to_host(thingy, is_https ? 443 : 80);
-		ERR_FAIL_COND_V_MSG(connect_err, connect_err, "Failed to connect to host " + url);
-		while (client->get_status() == HTTPClient::STATUS_RESOLVING || client->get_status() == HTTPClient::STATUS_CONNECTING) {
-			WGET_CANCELLED_CHECK();
-			err = client->poll();
-			if (err) {
-				return err;
-			}
-		}
-		if (client->get_status() != HTTPClient::STATUS_CONNECTED) {
-			return ERR_CANT_CONNECT;
-		}
-		WGET_CANCELLED_CHECK();
-		Error request_err = client->request(HTTPClient::METHOD_GET, url, extra_headers, nullptr, 0);
-		ERR_FAIL_COND_V_MSG(request_err, request_err, "Failed to connect to host " + url);
-		return OK;
-	};
-	bool done = false;
-	bool got_response = false;
-	List<String> response_headers;
-	int redirections = 0;
-	int response_code = 0;
-	int response_body_length = 0;
-	auto _handle_response = [&]() -> Error {
-		WGET_CANCELLED_CHECK();
-		if (!client->has_response()) {
-			return ERR_BUG;
-		}
-
-		got_response = true;
-		response_code = client->get_response_code();
-		List<String> rheaders;
-		client->get_response_headers(&rheaders);
-		response_headers.clear();
-
-		for (const String &E : rheaders) {
-			response_headers.push_back(E);
-		}
-		if (response_code == 404) {
-			return ERR_FILE_NOT_FOUND;
-		}
-		if (response_code == 403) {
-			return ERR_UNAUTHORIZED;
-		}
-		if (response_code == 401) {
-			return ERR_UNAUTHORIZED;
-		}
-		if (response_code >= 400) {
-			return ERR_BUG;
-		}
-
-		if (response_code == 301 || response_code == 302) {
-			// Handle redirect.
-
-			if (redirections >= 200) {
-				return ERR_CANT_OPEN;
-			}
-
-			String new_request;
-
-			for (const String &E : rheaders) {
-				if (E.containsn("Location: ")) {
-					new_request = E.substr(9, E.length()).strip_edges();
-				}
-			}
-
-			if (!new_request.is_empty()) {
-				// Process redirect.
-				client->close();
-				redirections += 1;
-				got_response = false;
-				request_url = new_request;
-				return connect_to_host_and_request(new_request);
-			}
-		}
-
-		return OK;
-	};
-	err = connect_to_host_and_request(p_url);
-
-	auto _retry = [&](Error retry_err) {
-		WGET_CANCELLED_CHECK();
-		if (retries <= 0) {
-			ERR_FAIL_V_MSG(ERR_CONNECTION_ERROR, vformat("Failed to download file from %s", p_url));
-		}
-		// Don't bother retrying if the file doesn't exist or we don't have access to it
-		if (response_code == 404 || response_code == 403 || response_code == 401) {
-			return retry_err;
-		}
-		retries--;
-		Ref<FileAccessBuffer> resp = response;
-		if (!resp.is_null()) {
-			resp->open_new();
-		} else {
-			String path = response->get_path();
-			response->close();
-			err = response->reopen(path, FileAccess::WRITE);
-			if (err != OK) {
-				return err;
-			}
-		}
-		return _wget_sync(p_url, response, retries, extra_headers, p_progress, p_cancelled, r_size);
-	};
-	size_t downloaded = 0;
-
-	while (!done) {
-		WGET_CANCELLED_CHECK();
-		auto status = client->get_status();
-		switch (status) {
-			case HTTPClient::STATUS_REQUESTING: {
-				client->poll();
-				break;
-			}
-			case HTTPClient::STATUS_BODY: {
-				if (!got_response) {
-					err = _handle_response();
-					if (err != OK) {
-						return _retry(err);
-					}
-					response_body_length = client->get_response_body_length();
-					if (!client->is_response_chunked() && response_body_length == 0) {
-						break;
-					}
-					if (r_size && got_response) {
-						*r_size = response_body_length;
-					}
-				} else {
-					err = client->poll();
-					if (err != OK) {
-						return _retry(err);
-					}
-					auto chunk = client->read_response_body_chunk();
-					downloaded += chunk.size();
-					response->store_buffer(chunk.ptr(), chunk.size());
-					if (p_progress) {
-						*p_progress = float(downloaded) / float(response_body_length);
-					}
-				}
-				break;
-			}
-			case HTTPClient::STATUS_CONNECTED: {
-				if (!got_response) {
-					err = _handle_response();
-					if (err != OK) {
-						return _retry(err);
-					}
-				} else {
-					done = true;
-				}
-				break;
-			}
-			default: {
-				return _retry(OK);
-			}
-		}
-	}
-	ERR_FAIL_COND_V_MSG(downloaded == 0, ERR_CANT_CREATE, "Failed to download file from " + p_url);
-	return OK;
-#undef WGET_CANCELLED_CHECK
-}
-} //namespace
-
-Error gdre::wget_sync(const String &p_url, Vector<uint8_t> &response, int retries, const Vector<String> &extra_headers, float *p_progress, bool *p_cancelled) {
-	Ref<FileAccessBuffer> fa = FileAccessBuffer::create(FileAccessBuffer::RESIZE_STRICT);
-	int64_t size = 0;
-	Error err = _wget_sync(p_url, fa, retries, extra_headers, p_progress, p_cancelled, &size);
-	if (err) {
-		return err;
-	}
-	response = fa->get_data();
-	return OK;
-}
-
-Error gdre::download_file_sync(const String &p_url, const String &output_path, float *p_progress, bool *p_cancelled, int64_t *r_size) {
-	Error dir_err = ensure_dir(output_path.get_base_dir());
-	if (dir_err) {
-		return dir_err;
-	}
-	Ref<FileAccess> fa = FileAccess::open(output_path, FileAccess::WRITE, &dir_err);
-	if (fa.is_null()) {
-		return ERR_FILE_CANT_WRITE;
-	}
-
-	Error download_err = _wget_sync(p_url, fa, 5, {}, p_progress, p_cancelled, r_size);
-	if (download_err) {
-		fa->close();
-		gdre::rimraf(output_path);
-		return download_err;
-	}
-	fa->close();
-	return OK;
-}
-
-Error gdre::wpost_sync(const String &p_url, const Vector<uint8_t> &p_data, const Vector<String> &extra_headers, bool gzip, float *p_progress, bool *p_cancelled) {
-#define WPOST_CANCELLED_CHECK()        \
-	if (p_cancelled && *p_cancelled) { \
-		return ERR_SKIP;               \
-	}
-	WPOST_CANCELLED_CHECK();
-	Ref<HTTPClient> client = HTTPClient::create();
-	client->set_blocking_mode(true);
-	Error err;
-	String request_url = p_url;
-	int64_t data_size = p_data.size();
-	Vector<uint8_t> data = p_data;
-	Vector<String> headers = extra_headers;
-	if (gzip) {
-		auto ret = Compression::compress(data.ptrw(), p_data.ptr(), p_data.size(), Compression::MODE_GZIP);
-		if (ret < 0) {
-			return ERR_BUG;
-		}
-		data.resize(ret);
-		if (!headers.has("Content-Encoding: gzip")) {
-			headers.push_back("Content-Encoding: gzip");
-		}
-	}
-
-	auto connect_to_host_and_request = [&](const String &url) {
-		WPOST_CANCELLED_CHECK();
-		bool is_https = url.begins_with("https://");
-		String host = url.get_slice("://", 1).get_slice("/", 0);
-		String thingy = (is_https ? "https://" : "http://") + host;
-		Error connect_err = client->connect_to_host(thingy, is_https ? 443 : 80);
-		ERR_FAIL_COND_V_MSG(connect_err, connect_err, "Failed to connect to host " + url);
-		while (client->get_status() == HTTPClient::STATUS_RESOLVING || client->get_status() == HTTPClient::STATUS_CONNECTING) {
-			WPOST_CANCELLED_CHECK();
-			err = client->poll();
-			if (err) {
-				return err;
-			}
-		}
-		if (client->get_status() != HTTPClient::STATUS_CONNECTED) {
-			return ERR_CANT_CONNECT;
-		}
-		WPOST_CANCELLED_CHECK();
-		// Send PUT request with body data
-		const uint8_t *body_ptr = data_size > 0 ? p_data.ptr() : nullptr;
-		Error request_err = client->request(HTTPClient::METHOD_POST, url, extra_headers, body_ptr, data_size);
-		ERR_FAIL_COND_V_MSG(request_err, request_err, "Failed to send PUT request to " + url);
-		return OK;
-	};
-
-	bool done = false;
-	bool got_response = false;
-	List<String> response_headers;
-	int redirections = 0;
-	int response_code = 0;
-
-	auto _handle_response = [&]() -> Error {
-		WPOST_CANCELLED_CHECK();
-		if (!client->has_response()) {
-			return ERR_BUG;
-		}
-
-		got_response = true;
-		response_code = client->get_response_code();
-		List<String> rheaders;
-		client->get_response_headers(&rheaders);
-		response_headers.clear();
-
-		for (const String &E : rheaders) {
-			response_headers.push_back(E);
-		}
-
-		// Handle error status codes
-		if (response_code == 404) {
-			return ERR_FILE_NOT_FOUND;
-		}
-		if (response_code == 403) {
-			return ERR_UNAUTHORIZED;
-		}
-		if (response_code == 401) {
-			return ERR_UNAUTHORIZED;
-		}
-		if (response_code >= 400) {
-			print_line("Error response code: " + itos(response_code));
-			return ERR_BUG;
-		}
-
-		// Handle redirects (less common for PUT, but possible)
-		if (response_code == 301 || response_code == 302) {
-			if (redirections >= 200) {
-				return ERR_CANT_OPEN;
-			}
-
-			String new_request;
-			for (const String &E : rheaders) {
-				if (E.containsn("Location: ")) {
-					new_request = E.substr(9, E.length()).strip_edges();
-				}
-			}
-
-			if (!new_request.is_empty()) {
-				client->close();
-				redirections += 1;
-				got_response = false;
-				request_url = new_request;
-				return connect_to_host_and_request(new_request);
-			}
-		}
-
-		return OK;
-	};
-
-	err = connect_to_host_and_request(p_url);
-	if (err != OK) {
-		return err;
-	}
-
-	while (!done) {
-		WPOST_CANCELLED_CHECK();
-		auto status = client->get_status();
-		switch (status) {
-			case HTTPClient::STATUS_REQUESTING: {
-				// Request is being sent - update progress if possible
-				if (p_progress && data_size > 0) {
-					// Approximate progress: if we're requesting, assume we're sending data
-					// This is a rough estimate since HTTPClient doesn't expose exact bytes sent
-					*p_progress = 0.5f; // Indicate we're in the middle of sending
-				}
-				err = client->poll();
-				if (err != OK) {
-					return err;
-				}
-				break;
-			}
-			case HTTPClient::STATUS_BODY: {
-				// Response body available (some PUT endpoints return data)
-				if (!got_response) {
-					err = _handle_response();
-					if (err != OK) {
-						return err;
-					}
-					// Update progress to indicate upload complete
-					if (p_progress) {
-						*p_progress = 1.0f;
-					}
-
-					int64_t response_body_length = client->get_response_body_length();
-					// Read response body if present (some APIs return data on PUT)
-					if (response_body_length > 0 || client->is_response_chunked()) {
-						// Consume the response body even if we don't use it
-						// This ensures the connection is properly closed
-						while (client->get_status() == HTTPClient::STATUS_BODY) {
-							WPOST_CANCELLED_CHECK();
-							err = client->poll();
-							if (err != OK) {
-								return err;
-							}
-							client->read_response_body_chunk();
-							// We don't store the response, just consume it
-						}
-					}
-				} else {
-					err = client->poll();
-					if (err != OK) {
-						return err;
-					}
-					client->read_response_body_chunk();
-				}
-				break;
-			}
-			case HTTPClient::STATUS_CONNECTED: {
-				if (!got_response) {
-					err = _handle_response();
-					if (err != OK) {
-						return err;
-					}
-					// Update progress to indicate upload complete
-					if (p_progress) {
-						*p_progress = 1.0f;
-					}
-				} else {
-					done = true;
-				}
-				break;
-			}
-			default: {
-				return ERR_CONNECTION_ERROR;
-			}
-		}
-	}
-
-	// Check if we got a successful response
-	if (response_code < 200 || response_code >= 300) {
-		return ERR_BUG;
-	}
-
-	return OK;
-#undef WPOST_CANCELLED_CHECK
 }
 
 Error gdre::rimraf(const String &dir) {
@@ -1270,16 +854,16 @@ Error gdre::copy_dir(const String &src, const String &dst) {
 	return da->copy_dir(src, dst);
 }
 
-bool gdre::store_var_compat(Ref<FileAccess> f, const Variant &p_var, int ver_major, bool p_full_objects) {
+bool gdre::store_var_compat(Ref<FileAccess> f, const Variant &p_var, int ver_major, bool p_full_objects, bool p_real_t_is_double) {
 	int len;
-	Error err = VariantDecoderCompat::encode_variant_compat(ver_major, p_var, nullptr, len, p_full_objects);
+	Error err = VariantDecoderCompat::encode_variant_compat(ver_major, p_var, nullptr, len, p_full_objects, p_real_t_is_double);
 	ERR_FAIL_COND_V_MSG(err != OK, false, "Error when trying to encode Variant.");
 
 	Vector<uint8_t> buff;
 	buff.resize(len);
 
 	uint8_t *w = buff.ptrw();
-	err = VariantDecoderCompat::encode_variant_compat(ver_major, p_var, &w[0], len, p_full_objects);
+	err = VariantDecoderCompat::encode_variant_compat(ver_major, p_var, &w[0], len, p_full_objects, p_real_t_is_double);
 	ERR_FAIL_COND_V_MSG(err != OK, false, "Error when trying to encode Variant.");
 
 	return f->store_32(uint32_t(len)) && f->store_buffer(buff);
@@ -1288,7 +872,10 @@ bool gdre::store_var_compat(Ref<FileAccess> f, const Variant &p_var, int ver_maj
 Ref<FileAccess> gdre::open_encrypted_v3(const String &p_path, int p_mode, const Vector<uint8_t> &p_key) {
 	Ref<FileAccess> p_base = FileAccess::open(p_path, p_mode);
 	ERR_FAIL_COND_V(p_base.is_null(), Ref<FileAccess>());
+	return open_encrypted_v3_from_file(p_base, p_mode, p_key);
+}
 
+Ref<FileAccess> gdre::open_encrypted_v3_from_file(Ref<FileAccess> p_base, int p_mode, const Vector<uint8_t> &p_key) {
 	Ref<FileAccessEncryptedv3> fae;
 	fae.instantiate();
 	Error err = fae->open_and_parse(p_base, p_key, (p_mode == FileAccess::WRITE) ? FileAccessEncryptedv3::MODE_WRITE_AES256 : FileAccessEncryptedv3::MODE_READ);
@@ -1298,13 +885,21 @@ Ref<FileAccess> gdre::open_encrypted_v3(const String &p_path, int p_mode, const 
 	return fae;
 }
 
-String gdre::get_full_path(const String &p_path, DirAccess::AccessType p_access) {
+String gdre::get_full_path(const String &p_path) {
 	String path = p_path.simplify_path();
 	bool is_dir = DirAccess::exists(path);
 	if (!(is_dir || FileAccess::exists(path))) {
 		return path;
 	}
-	Ref<DirAccess> da = DirAccess::create(p_access);
+	DirAccess::AccessType access;
+	if (p_path.begins_with("res://")) {
+		access = DirAccess::ACCESS_RESOURCES;
+	} else if (p_path.begins_with("user://")) {
+		access = DirAccess::ACCESS_USERDATA;
+	} else {
+		access = DirAccess::ACCESS_FILESYSTEM;
+	}
+	Ref<DirAccess> da = DirAccess::create(access);
 	ERR_FAIL_COND_V_MSG(da.is_null(), path, "Failed to create DirAccess.");
 	ERR_FAIL_COND_V_MSG(da->change_dir(p_path.get_base_dir()) != OK, path, "Failed to change directory.");
 	String real_base_dir = da->get_current_dir();
@@ -1331,7 +926,7 @@ String gdre::get_full_path(const String &p_path, DirAccess::AccessType p_access)
 	}
 	if (!new_path.is_empty()) {
 		if (is_dir) {
-			return DirAccess::get_full_path(new_path, p_access);
+			return DirAccess::get_full_path(new_path, access);
 		}
 		return new_path;
 	}
@@ -1560,13 +1155,13 @@ String gdre::get_safe_dir_name(const String &p_dir_name, bool p_allow_paths) {
 }
 
 Ref<Image> gdre::load_image_from_file(const String &p_path) {
-#ifdef DEBUG_ENABLED
-	GDRELogger::set_thread_local_silent_errors(true);
-#endif
-	Ref<Image> image = Image::load_from_file(p_path);
-#ifdef DEBUG_ENABLED
-	GDRELogger::set_thread_local_silent_errors(false);
-#endif
+	Ref<Image> image;
+	image.instantiate();
+	Error err = ImageLoader::load_image(p_path, image);
+	ERR_FAIL_COND_V_MSG(err == ERR_FILE_UNRECOGNIZED, Ref<Image>(), vformat("Image has unsupported format: %s", p_path));
+	if (err != OK) {
+		return Ref<Image>();
+	}
 	return image;
 }
 
@@ -1593,6 +1188,12 @@ Error gdre::clear_dir_except_for(const String &p_dir, const Vector<String> &p_fi
 	return OK;
 }
 
+String gdre::get_latin1_string_from_bytes(const PackedByteArray &p_bytes) {
+	String salt;
+	salt.append_latin1(Span((const char *)p_bytes.ptr(), p_bytes.size()));
+	return salt;
+}
+
 void GDRECommon::_bind_methods() {
 	//	ClassDB::bind_static_method("GLTFCamera", D_METHOD("from_node", "camera_node"), &GLTFCamera::from_node);
 
@@ -1610,6 +1211,7 @@ void GDRECommon::_bind_methods() {
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("rsplit_multichar", "str", "splitters", "allow_empty", "maxsplit"), &gdre::_rsplit_multichar);
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("copy_dir", "src", "dst"), &gdre::copy_dir);
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("open_encrypted_v3", "path", "mode", "key"), &gdre::open_encrypted_v3);
+	ClassDB::bind_static_method("GDRECommon", D_METHOD("open_encrypted_v3_from_file", "file", "mode", "key"), &gdre::open_encrypted_v3_from_file);
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("filter_error_backtraces", "error_messages"), &gdre::filter_error_backtraces);
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("get_files_for_paths", "paths"), &gdre::get_files_for_paths);
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("rimraf", "path"), &gdre::rimraf);
@@ -1622,4 +1224,6 @@ void GDRECommon::_bind_methods() {
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("get_recursive_dir_list_multithread", "dir", "wildcards", "absolute", "include_hidden", "exclude_filters", "files_first", "exclude_dot_prefix_and_gdignore", "show_progress"), &gdre::get_recursive_dir_list_multithread, DEFVAL(PackedStringArray()), DEFVAL(true), DEFVAL(true), DEFVAL(PackedStringArray()), DEFVAL(false), DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("get_safe_dir_name", "dir_name", "allow_paths"), &gdre::get_safe_dir_name, DEFVAL(false));
 	ClassDB::bind_static_method("GDRECommon", D_METHOD("clear_dir_except_for", "dir", "files_or_dirs"), &gdre::clear_dir_except_for);
+	ClassDB::bind_static_method("GDRECommon", D_METHOD("load_image_from_file", "path"), &gdre::load_image_from_file);
+	ClassDB::bind_static_method("GDRECommon", D_METHOD("get_latin1_string_from_bytes", "bytes"), &gdre::get_latin1_string_from_bytes);
 }

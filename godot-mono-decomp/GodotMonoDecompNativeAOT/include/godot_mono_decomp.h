@@ -5,6 +5,10 @@
 extern "C" {
 #endif
 
+// Unless documented otherwise, all char pointers passed across this API are
+// null-terminated UTF-8 strings. Strings returned by this API must be released
+// with GodotMonoDecomp_FreeString or GodotMonoDecomp_FreeArray, as applicable.
+
 typedef enum {
 AUTO_LANGUAGE_VERSION = 0,
 LANG_VER_CSharp1 = 1,
@@ -23,6 +27,9 @@ LANG_VER_CSharp10_0 = 1000,
 LANG_VER_CSharp11_0 = 1100,
 LANG_VER_Preview = 1100,
 LANG_VER_CSharp12_0 = 1200,
+LANG_VER_CSharp13_0 = 1300,
+LANG_VER_CSharp14_0 = 1400,
+LANG_VER_CSharp15_0 = 1500,
 LANG_VER_Latest = 0x7FFFFFFF
 } LanguageVersion;
 
@@ -48,6 +55,10 @@ void* GodotMonoDecomp_CreateGodotModuleDecompiler(
 	bool verifyNuGetPackageIsFromNugetOrg,
 	bool copyOutOfTreeReferences,
 	bool createAdditionalProjectsForProjectReferences,
+	bool removeGeneratedJsonContextBody,
+	bool enableCollectionInitializerLifting,
+	bool emitILAnnotationComments,
+	bool automaticallySearchWorkshopDependencies,
 	LanguageVersion OverrideLanguageVersion
 );
 
@@ -124,6 +135,10 @@ void GodotMonoDecomp_FreeString(void* str);
 int* GodotMonoDecomp_GetLanguageVersions(int* r_num_versions);
 
 int GodotMonoDecomp_IsCustomVersionDetected(void *decompilerHandle);
+
+bool GodotMonoDecomp_CheckFileIsAssembly(const char* file);
+
+const char** GodotMonoDecomp_GetGlobalClassFiles(void* decompilerHandle, int* r_num_files);
 
 #ifdef __cplusplus
 }

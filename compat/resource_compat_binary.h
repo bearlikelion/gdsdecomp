@@ -174,7 +174,7 @@ public:
 
 	static Error rewrite_v2_import_metadata(const String &p_path, const String &p_dst, Ref<ResourceImportMetadatav2> imd);
 
-	static Error test_writing_parsing_variant(Variant p_v, Variant &r_v, int ver_major, int ver_minor);
+	static Error test_writing_parsing_variant(Variant p_v, Variant &r_v, int ver_major, int ver_minor, bool using_real_t_double);
 };
 
 class ResourceFormatSaverCompatBinaryInstance {
@@ -236,10 +236,12 @@ class ResourceFormatSaverCompatBinaryInstance {
 	void _find_resources(const Variant &p_variant, bool p_main = false);
 	static void save_unicode_string(Ref<FileAccess> f, const String &p_string, bool p_bit_on_len = false);
 	int get_string_index(const String &p_string);
-	Dictionary fix_scene_bundle(const Ref<PackedScene> &p_scene, int original_version);
+	Dictionary fix_scene_bundle_format(const Ref<PackedScene> &p_scene);
 	Error set_save_settings(const Ref<Resource> &p_resource, uint32_t p_flags);
 
 	static String get_local_path(const String &p_path, const Ref<Resource> &p_resource);
+
+	Error _save_to_file(const Ref<FileAccess> &p_f, const String &p_path, const Ref<Resource> &p_resource, uint32_t p_flags = 0);
 
 public:
 	enum {
@@ -253,6 +255,7 @@ public:
 	};
 	Error write_v2_import_metadata(Ref<FileAccess> f, Ref<ResourceImportMetadatav2> imd, HashMap<Ref<Resource>, int> &p_resource_map);
 	Error save(const String &p_path, const Ref<Resource> &p_resource, uint32_t p_flags = 0);
+	Error save_to_file(const Ref<FileAccess> &p_f, const String &p_path, const Ref<Resource> &p_resource, uint32_t p_flags = 0);
 	Error set_uid(const String &p_path, ResourceUID::ID p_uid);
 	void write_variant(Ref<FileAccess> f, const Variant &p_property, HashMap<Ref<Resource>, int> &resource_map, HashMap<Ref<Resource>, int> &external_resources, HashMap<StringName, int> &string_map, const PropertyInfo &p_hint = PropertyInfo());
 };

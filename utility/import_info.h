@@ -5,7 +5,6 @@
 #include "core/object/object.h"
 #include "core/object/ref_counted.h"
 #include "core/os/shared_object.h"
-#include "core/variant/binder_common.h"
 
 #include "utility/resource_info.h"
 namespace V2ImportEnums {
@@ -84,6 +83,7 @@ public:
 
 protected:
 	String import_md_path; // path to the ".import" file
+	IInfoType iitype;
 	int ver_major = 0; //2, 3, 4
 	int ver_minor = 0;
 	bool not_an_import = false;
@@ -92,7 +92,6 @@ protected:
 	String preferred_import_path;
 	String export_dest;
 	String export_lossless_copy;
-	IInfoType iitype;
 	void _init();
 	virtual Error _load(const String &p_path) = 0;
 
@@ -132,6 +131,7 @@ public:
 	virtual void set_type(const String &p_type) = 0;
 
 	virtual String get_importer() const = 0;
+	virtual void set_importer(const String &p_importer) = 0;
 
 	virtual String get_compat_type() const = 0;
 	// Gets the original file that the godot resource was imported from (e.g. res://icon.png)
@@ -144,6 +144,7 @@ public:
 	virtual void set_source_and_md5(const String &path, const String &md5 = "") = 0;
 
 	virtual String get_uid() const { return String(); }
+	virtual void set_uid(const String &p_uid) { return; }
 	// v2 only, Atlas Textures had more than one source
 	virtual Vector<String> get_additional_sources() const { return Vector<String>(); }
 	virtual void set_additional_sources(const Vector<String> &p_add_sources) { return; }
@@ -157,11 +158,11 @@ public:
 	virtual Dictionary get_metadata_prop() const { return Dictionary(); }
 	virtual void set_metadata_prop(Dictionary r_dict) { return; }
 
-	virtual Variant get_param(const String &p_key) const = 0;
+	virtual Variant get_param(const String &p_key, const Variant &p_default = Variant()) const = 0;
 	virtual void set_param(const String &p_key, const Variant &p_val) = 0;
 	virtual bool has_param(const String &p_key) const = 0;
 
-	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop) const = 0;
+	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_default = Variant()) const = 0;
 	virtual void set_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_val) = 0;
 
 	// gets the parameters used to import the resource.
@@ -206,12 +207,15 @@ protected:
 	virtual void _set_from_json(const Dictionary &p_json) override;
 
 public:
+	static String get_remap_path_from_file(const String &p_import_file_path);
+
 	// Gets the Godot resource type (e.g. "StreamTexture")
 	virtual String get_type() const override;
 	virtual void set_type(const String &p_type) override;
 	virtual String get_compat_type() const override;
 
 	virtual String get_importer() const override;
+	virtual void set_importer(const String &p_importer) override;
 
 	// Gets the original file that the godot resource was imported from (e.g. res://icon.png)
 	virtual String get_source_file() const override;
@@ -223,6 +227,7 @@ public:
 	virtual void set_source_and_md5(const String &path, const String &md5 = "") override;
 
 	virtual String get_uid() const override;
+	virtual void set_uid(const String &p_uid) override;
 
 	// Gets the godot resources that were created from from this import (e.g. res://icon.<md5>.stex)
 	virtual Vector<String> get_dest_files() const override;
@@ -232,11 +237,11 @@ public:
 	virtual Dictionary get_metadata_prop() const override;
 	virtual void set_metadata_prop(Dictionary r_dict) override;
 
-	virtual Variant get_param(const String &p_key) const override;
+	virtual Variant get_param(const String &p_key, const Variant &p_default = Variant()) const override;
 	virtual void set_param(const String &p_key, const Variant &p_val) override;
 	virtual bool has_param(const String &p_key) const override;
 
-	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop) const override;
+	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_default = Variant()) const override;
 	virtual void set_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_val) override;
 
 	// gets the parameters used to import the resource.
@@ -273,6 +278,7 @@ public:
 	virtual String get_compat_type() const override;
 
 	virtual String get_importer() const override;
+	virtual void set_importer(const String &p_importer) override;
 
 	// Gets the original file that the godot resource was imported from (e.g. res://icon.png)
 	virtual String get_source_file() const override;
@@ -290,11 +296,11 @@ public:
 	virtual Vector<String> get_dest_files() const override;
 	virtual void set_dest_files(const Vector<String> p_dest_files) override;
 
-	virtual Variant get_param(const String &p_key) const override;
+	virtual Variant get_param(const String &p_key, const Variant &p_default = Variant()) const override;
 	virtual void set_param(const String &p_key, const Variant &p_val) override;
 	virtual bool has_param(const String &p_key) const override;
 
-	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop) const override;
+	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_default = Variant()) const override;
 	virtual void set_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_val) override;
 
 	// gets the parameters used to import the resource.
@@ -330,6 +336,7 @@ public:
 	virtual String get_compat_type() const override;
 
 	virtual String get_importer() const override { return importer; }
+	virtual void set_importer(const String &p_importer) override { importer = p_importer; }
 
 	virtual String get_source_file() const override { return source_file; }
 	virtual void set_source_file(const String &path) override { source_file = path; }
@@ -347,11 +354,11 @@ public:
 	virtual Vector<String> get_dest_files() const override { return dest_files; }
 	virtual void set_dest_files(const Vector<String> p_dest_files) override { dest_files = p_dest_files; }
 
-	virtual Variant get_param(const String &p_key) const override { return Variant(); }
+	virtual Variant get_param(const String &p_key, const Variant &p_default = Variant()) const override { return p_default; }
 	virtual void set_param(const String &p_key, const Variant &p_val) override { return; }
 	virtual bool has_param(const String &p_key) const override { return false; }
 
-	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop) const override { return Variant(); }
+	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_default = Variant()) const override { return p_default; }
 	virtual void set_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_val) override { return; }
 
 	virtual Dictionary get_params() const override { return Dictionary(); }
@@ -373,6 +380,7 @@ private:
 	virtual Error _load(const String &p_path) override;
 
 public:
+	static String get_remap_path_from_file(const String &p_remap_file_path);
 	ImportInfoRemap();
 };
 
@@ -392,7 +400,7 @@ protected:
 
 public:
 	Error load_from_string(const String &p_fakepath, const String &p_string);
-	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop) const override;
+	virtual Variant get_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_default = Variant()) const override;
 	virtual void set_iinfo_val(const String &p_section, const String &p_prop, const Variant &p_val) override;
 
 	Vector<SharedObject> get_libaries(bool fix_rel_paths = true) const;

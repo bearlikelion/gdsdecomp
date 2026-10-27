@@ -103,10 +103,6 @@ PlaceHolderScriptInstance *FakeScript::placeholder_instance_create(Object *p_thi
 	return si;
 }
 
-bool FakeScript::instance_has(const Object *p_this) const {
-	return true;
-}
-
 bool FakeScript::has_source_code() const {
 	return !source.is_empty();
 }
@@ -387,6 +383,10 @@ const Variant FakeScriptInstance::get_rpc_config() const {
 
 ScriptLanguage *FakeScriptInstance::get_language() {
 	return nullptr;
+}
+
+void FakeScriptInstance::force_set_property(const StringName &p_name, const Variant &p_value) {
+	properties[p_name] = p_value;
 }
 
 FakeScriptInstance::~FakeScriptInstance() {

@@ -35,6 +35,8 @@
 #include "compat/variant_decoder_compat.h"
 #include "core/templates/rb_map.h"
 
+namespace {
+
 struct _bit {
 	Variant::Type type;
 	const char *text;
@@ -114,6 +116,7 @@ static const _kws _keyword_list[] = {
 
 	{ GDScriptDecomp::G_TK_ERROR, nullptr }
 };
+} //namespace
 
 GDScriptTokenizerV1Compat::GDScriptTokenizerV1Compat(const GDScriptDecomp *p_decomp) :
 		decomp(p_decomp) {
@@ -300,7 +303,8 @@ void GDScriptV1TokenizerTextCompat::_make_type(const int &p_type) {
 	Token &tk = tk_rb[tk_rb_pos];
 
 	tk.type = T::G_TK_BUILT_IN_TYPE;
-	tk.literal = p_type;
+	tk.func = p_type;
+	tk.literal = VariantDecoderCompat::get_variant_type_name(p_type, decomp->get_variant_ver_major());
 	tk.vtype = VariantDecoderCompat::convert_variant_type_from_old(p_type, decomp->get_variant_ver_major());
 	tk.start_line = line;
 	tk.start_column = column;
@@ -1037,6 +1041,15 @@ int GDScriptV1TokenizerTextCompat::get_token_built_in_func(int p_offset) const {
 	return tk_rb[ofs].func;
 }
 
+int GDScriptV1TokenizerTextCompat::get_old_token_type(int p_offset) const {
+	ERR_FAIL_COND_V(p_offset <= -MAX_LOOKAHEAD, -1);
+	ERR_FAIL_COND_V(p_offset >= MAX_LOOKAHEAD, -1);
+
+	int ofs = (TK_RB_SIZE + tk_rb_pos + p_offset - MAX_LOOKAHEAD - 1) % TK_RB_SIZE;
+	ERR_FAIL_COND_V(tk_rb[ofs].type != T::G_TK_BUILT_IN_TYPE, -1);
+	return tk_rb[ofs].func;
+}
+
 Variant::Type GDScriptV1TokenizerTextCompat::get_token_type(int p_offset) const {
 	ERR_FAIL_COND_V(p_offset <= -MAX_LOOKAHEAD, Variant::NIL);
 	ERR_FAIL_COND_V(p_offset >= MAX_LOOKAHEAD, Variant::NIL);
@@ -1095,6 +1108,7 @@ GDScriptV1TokenizerTextCompat::GDScriptV1TokenizerTextCompat(const GDScriptDecom
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 #include "core/io/marshalls.h"
+#include "utility/common.h"
 
 #define BYTECODE_VERSION 13
 
@@ -1109,7 +1123,6 @@ GDScriptV1TokenizerTextCompat::GDScriptV1TokenizerTextCompat(const GDScriptDecom
 	}
 #define GDSC_HEADER "GDSC"
 #define CHECK_GDSC_HEADER(p_buffer) _GDRE_CHECK_HEADER(p_buffer, GDSC_HEADER)
-#include "utility/common.h"
 
 Error GDScriptV1TokenizerBufferCompat::set_code_buffer(const Vector<uint8_t> &p_buffer) {
 	const uint8_t *buf = p_buffer.ptr();
@@ -1185,6 +1198,18 @@ Error GDScriptV1TokenizerBufferCompat::set_code_buffer(const Vector<uint8_t> &p_
 			total_len--;
 		}
 	}
+	int prev_column = 1;
+	// Get the actual columns; the bytecode emitter for v3.x and below didn't actually store the columns
+	for (auto &[tk_idx, linecol] : lines) {
+		int column = linecol >> TOKEN_LINE_BITS;
+		if (column == 0 && tk_idx < tokens.size() && decomp->get_global_token(tokens[tk_idx]) == GDScriptDecomp::G_TK_NEWLINE) {
+			column = (tokens[tk_idx] >> TOKEN_BITS) + 1;
+		} else if (column == 0) {
+			column = prev_column;
+		}
+		prev_column = column;
+		columns[tk_idx] = column;
+	}
 
 	token = 0;
 	current_indent = 0;
@@ -1198,6 +1223,9 @@ Vector<uint8_t> GDScriptV1TokenizerBufferCompat::parse_code_string(const String 
 	HashMap<Variant, int> constant_map;
 	RBMap<uint32_t, int> line_map;
 	Vector<uint32_t> token_array;
+
+	// GDScriptV1TokenizerBufferCompat is only used for GDScript 1.0, (e.g. 3.x and below), which did not support double precision
+	constexpr bool real_t_is_double = false;
 
 	int variant_ver_major = p_decomp->get_variant_ver_major();
 
@@ -1235,7 +1263,7 @@ Vector<uint8_t> GDScriptV1TokenizerBufferCompat::parse_code_string(const String 
 				local_token |= constant_map[c] << TOKEN_BITS;
 			} break;
 			case Token::G_TK_BUILT_IN_TYPE: {
-				int local_type = tt.get_token_constant();
+				int local_type = tt.get_old_token_type();
 				local_token |= local_type << TOKEN_BITS;
 			} break;
 			case Token::G_TK_BUILT_IN_FUNC: {
@@ -1320,11 +1348,11 @@ Vector<uint8_t> GDScriptV1TokenizerBufferCompat::parse_code_string(const String 
 
 	for (RBMap<int, Variant>::Element *E = rev_constant_map.front(); E; E = E->next()) {
 		int len;
-		Error err = VariantDecoderCompat::encode_variant_compat(variant_ver_major, E->get(), nullptr, len, encode_full_objects);
+		Error err = VariantDecoderCompat::encode_variant_compat(variant_ver_major, E->get(), nullptr, len, encode_full_objects, real_t_is_double);
 		GDSDECOMP_FAIL_COND_V_MSG(err != OK, Vector<uint8_t>(), "Error when trying to encode Variant.");
 		int pos = buf.size();
 		buf.resize_initialized(pos + len);
-		VariantDecoderCompat::encode_variant_compat(variant_ver_major, E->get(), &buf.write[pos], len, encode_full_objects);
+		VariantDecoderCompat::encode_variant_compat(variant_ver_major, E->get(), &buf.write[pos], len, encode_full_objects, real_t_is_double);
 	}
 
 	for (RBMap<int, uint32_t>::Element *E = rev_line_map.front(); E; E = E->next()) {
@@ -1379,6 +1407,12 @@ int GDScriptV1TokenizerBufferCompat::get_token_built_in_func(int p_offset) const
 	return int(tokens[offset] >> TOKEN_BITS);
 }
 
+int GDScriptV1TokenizerBufferCompat::get_old_token_type(int p_offset) const {
+	int offset = token + p_offset;
+	ERR_FAIL_INDEX_V(offset, tokens.size(), -1);
+	return int(tokens[offset] >> TOKEN_BITS);
+}
+
 Variant::Type GDScriptV1TokenizerBufferCompat::get_token_type(int p_offset) const {
 	int offset = token + p_offset;
 	ERR_FAIL_INDEX_V(offset, tokens.size(), Variant::NIL);
@@ -1387,41 +1421,41 @@ Variant::Type GDScriptV1TokenizerBufferCompat::get_token_type(int p_offset) cons
 	return VariantDecoderCompat::convert_variant_type_from_old(local_type, decomp->get_variant_ver_major());
 }
 
-int GDScriptV1TokenizerBufferCompat::get_token_line(int p_offset) const {
-	int offset = token + p_offset;
+namespace {
+uint32_t _get_token_line(const RBMap<uint32_t, uint32_t> &lines, int offset) {
 	auto pos_it = lines.find_closest(offset);
 
-	auto largest = lines.back();
-	uint32_t l = 0;
 	if (pos_it == nullptr) {
+		auto largest = lines.back();
 		if (offset > largest->key()) {
-			l = largest->value();
+			return largest->value();
 		} else {
-			return -1;
+			return lines.front()->value();
 		}
-	} else {
-		l = pos_it->value();
 	}
+
+	return pos_it->value();
+}
+} //namespace
+
+int GDScriptV1TokenizerBufferCompat::get_token_line(int p_offset) const {
+	int offset = token + p_offset;
+	if (lines.is_empty()) {
+		return -1;
+	}
+	uint32_t l = _get_token_line(lines, offset);
 
 	return l & TOKEN_LINE_MASK;
 }
 
 int GDScriptV1TokenizerBufferCompat::get_token_column(int p_offset) const {
 	int offset = token + p_offset;
-	auto pos_it = lines.find_closest(offset);
-
-	auto largest = lines.back();
-	uint32_t l = 0;
-	if (pos_it == nullptr) {
-		if (offset > largest->key()) {
-			l = largest->value();
-		} else {
-			return -1;
-		}
-	} else {
-		l = pos_it->value();
+	if (lines.is_empty()) {
+		return -1;
 	}
-	return l >> TOKEN_LINE_BITS;
+	int l = _get_token_line(columns, offset);
+
+	return l;
 }
 int GDScriptV1TokenizerBufferCompat::get_token_line_indent(int p_offset) const {
 	int offset = token + p_offset;
@@ -1440,13 +1474,36 @@ String GDScriptV1TokenizerBufferCompat::get_token_error(int p_offset) const {
 }
 
 void GDScriptV1TokenizerBufferCompat::advance(int p_amount) {
+	if (unlikely((p_amount + token) < 0 || (p_amount + token) >= (tokens.size()))) {
+		_err_print_index_error(FUNCTION_STR, __FILE__, __LINE__, p_amount + token, tokens.size(), _STR(p_amount + token), _STR(tokens.size()));
+		return;
+	} else {
+		((void)0);
+	}
 	ERR_FAIL_INDEX(p_amount + token, tokens.size());
 	token += p_amount;
 }
 
 GDScriptTokenizerV1Compat::Token GDScriptTokenizerV1Compat::scan() {
+	// Resolve pending indentation change.
+	if (pending_indents > 0) {
+		pending_indents--;
+		Token indent;
+		indent.type = Token::Type::G_TK_INDENT;
+		indent.start_line = current_line;
+		indent.end_line = current_line;
+		return indent;
+	} else if (pending_indents < 0) {
+		pending_indents++;
+		Token dedent;
+		dedent.type = Token::Type::G_TK_DEDENT;
+		dedent.start_line = current_line;
+		dedent.end_line = current_line;
+		return dedent;
+	}
+
 	int line = get_token_line();
-	const TokenType g_token = get_token();
+	TokenType g_token = get_token();
 	if (g_token == TokenType::G_TK_EOF) {
 		Token data;
 		data.type = TokenType::G_TK_EOF;
@@ -1454,6 +1511,38 @@ GDScriptTokenizerV1Compat::Token GDScriptTokenizerV1Compat::scan() {
 		data.start_column = get_token_column();
 		return data;
 	}
+
+	if (g_token == TokenType::G_TK_NEWLINE) {
+		current_line = line;
+		int previous_indent = current_indent;
+		current_indent = get_token_line_indent();
+
+		// Check if there's a need to indent/dedent.
+		if (!multiline_mode) {
+			pending_indents += (current_indent - previous_indent);
+
+			Token newline;
+			newline.type = Token::Type::G_TK_NEWLINE;
+			newline.start_line = current_line;
+			newline.end_line = current_line;
+			last_token_was_newline = true;
+			advance();
+			return newline;
+		} else {
+			while (g_token == TokenType::G_TK_NEWLINE) {
+				advance();
+				line = get_token_line();
+				g_token = get_token();
+				if (g_token == TokenType::G_TK_NEWLINE) {
+					current_line = line;
+					current_indent = get_token_line_indent();
+				}
+			}
+		}
+	}
+
+	last_token_was_newline = false;
+
 	StringName id;
 	Variant c;
 	String err;
@@ -1467,7 +1556,8 @@ GDScriptTokenizerV1Compat::Token GDScriptTokenizerV1Compat::scan() {
 			data.literal = get_token_constant();
 		} break;
 		case TokenType::G_TK_BUILT_IN_TYPE: {
-			data.literal = get_token_constant();
+			data.func = get_old_token_type();
+			data.literal = VariantDecoderCompat::get_variant_type_name(data.func, decomp->get_variant_ver_major());
 			data.vtype = get_token_type();
 		} break;
 		case TokenType::G_TK_BUILT_IN_FUNC: {
@@ -1475,21 +1565,20 @@ GDScriptTokenizerV1Compat::Token GDScriptTokenizerV1Compat::scan() {
 			data.func = get_token_built_in_func();
 			data.literal = decomp->get_function_name(data.func);
 		} break;
-		case TokenType::G_TK_NEWLINE: {
-			current_indent = get_token_line_indent();
-		} break;
 		case TokenType::G_TK_ERROR: {
 			data.literal = get_token_error();
 		} break;
 		default: {
 		}
 	};
-	data.start_line = line;
+	data.start_line = current_line;
 	data.end_line = line;
 	data.start_column = get_token_column();
 	data.end_column = data.start_column;
-	data.current_indent = current_indent;
-	advance();
+	current_line = line;
+	if (g_token != TokenType::G_TK_EOF) {
+		advance();
+	}
 	return data;
 }
 

@@ -30,6 +30,9 @@
 
 #include "gdscript_v2_tokenizer_buffer.h"
 
+#include "compat/variant_decoder_compat.h"
+#include "utility/gdre_settings.h"
+
 #include "core/io/compression.h"
 #include "core/io/marshalls.h"
 
@@ -86,6 +89,9 @@ int GDScriptV2TokenizerBufferCompat::_token_to_binary(const Token &p_token, Vect
 }
 
 int get_token_line(const RBMap<int, int> &lines, int offset) {
+	if (lines.is_empty()) {
+		return -1;
+	}
 	auto pos_it = lines.find_closest(offset);
 
 	auto largest = lines.back();
@@ -94,7 +100,7 @@ int get_token_line(const RBMap<int, int> &lines, int offset) {
 		if (offset > largest->key()) {
 			l = largest->value();
 		} else {
-			return -1;
+			return lines.front()->value();
 		}
 	} else {
 		l = pos_it->value();
@@ -117,6 +123,9 @@ GDScriptV2TokenizerCompat::Token GDScriptV2TokenizerBufferCompat::_binary_to_tok
 	// token.start_line = decode_uint32(b);
 	token.start_line = get_token_line(token_lines, p_token_index);
 	token.end_line = decode_uint32(b);
+	if (token.start_line > token.end_line || token.start_line == -1) {
+		token.start_line = token.end_line;
+	}
 	token.start_column = get_token_line(token_columns, p_token_index);
 	token.end_column = token.start_column;
 
@@ -267,6 +276,10 @@ Vector<uint8_t> GDScriptV2TokenizerBufferCompat::parse_code_string(const String 
 	HashMap<uint32_t, uint32_t> token_lines;
 	HashMap<uint32_t, uint32_t> token_columns;
 
+	// TODO: This shouldn't actually matter, as no real_t variants (Vector2, Vector3, etc.) are actually encoded as variants;
+	// Rather, they get turned into their respective constructor tokens (e.g. TK_IDENTIFIER=Vector2, TK_PARENTHESIS_OPEN, TK_CONSTANT=<float>, etc...)
+	bool real_t_is_double = GDRESettings::get_singleton()->requires_double_precision();
+
 	GDScriptV2TokenizerCompatText tokenizer(p_decomp);
 	tokenizer.set_source_code(p_code);
 	tokenizer.set_multiline_mode(true); // Ignore whitespace tokens.
@@ -363,7 +376,7 @@ Vector<uint8_t> GDScriptV2TokenizerBufferCompat::parse_code_string(const String 
 		Error err = encode_variant(v, nullptr, len, false);
 		ERR_FAIL_COND_V_MSG(err != OK, Vector<uint8_t>(), "Error when trying to encode Variant.");
 		contents.resize(buf_pos + len);
-		encode_variant(v, &contents.write[buf_pos], len, false);
+		VariantDecoderCompat::encode_variant_compat(p_decomp->get_variant_ver_major(), v, &contents.write[buf_pos], len, false, real_t_is_double);
 		buf_pos += len;
 	}
 
@@ -483,12 +496,16 @@ GDScriptV2TokenizerCompat::Token GDScriptV2TokenizerBufferCompat::scan() {
 		}
 		Token eof;
 		eof.type = Token::Type::G_TK_EOF;
+		eof.start_line = current_line;
+		eof.end_line = current_line;
 		return eof;
 	};
 
 	if (!last_token_was_newline && token_lines.has(current)) {
 		current_line = token_lines[current];
-		uint32_t current_column = token_columns[current];
+		auto it = token_columns.find(current);
+		uint32_t current_column = it->value();
+		uint32_t current_indent = current_column - 1;
 
 		// Check if there's a need to indent/dedent.
 		if (!multiline_mode) {
@@ -496,11 +513,30 @@ GDScriptV2TokenizerCompat::Token GDScriptV2TokenizerBufferCompat::scan() {
 			if (!indent_stack.is_empty()) {
 				previous_indent = indent_stack.back()->get();
 			}
-			if (current_column - 1 > previous_indent) {
+			if (current_indent > previous_indent) {
+				// find the next column that is less than the current column
+				Vector<uint32_t> detents;
+				for (it = it->next(); it != nullptr; it = it->next()) {
+					uint32_t next = it->value() - 1;
+					if (next <= previous_indent) {
+						break;
+					}
+					if (next < current_indent && next > previous_indent) {
+						// the next dedent is bigger than the previous indent, we need to indent once more
+						if (!detents.has(next)) {
+							detents.push_back(next);
+						}
+					}
+				}
+				detents.sort();
+				for (uint32_t dedent : detents) {
+					pending_indents++;
+					indent_stack.push_back(dedent);
+				}
 				pending_indents++;
-				indent_stack.push_back(current_column - 1);
+				indent_stack.push_back(current_indent);
 			} else {
-				while (current_column - 1 < previous_indent) {
+				while (current_indent < previous_indent) {
 					pending_indents--;
 					indent_stack.pop_back();
 					if (indent_stack.is_empty()) {

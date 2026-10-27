@@ -70,6 +70,11 @@ bool ResourceInfo::resource_has_info(Ref<Resource> res) {
 	return ((Ref<ResourceInfo>)res->get_meta(META_COMPAT, Ref<ResourceInfo>())).is_valid();
 }
 
+Pair<int, int> ResourceInfo::get_ver_major_minor(Ref<Resource> res) {
+	Ref<ResourceInfo> info = get_info_from_resource(res);
+	return info.is_valid() ? Pair<int, int>(info->ver_major, info->ver_minor) : Pair<int, int>(0, 0);
+}
+
 int ResourceInfo::get_ver_major() const {
 	return ver_major;
 }
@@ -186,4 +191,13 @@ void ResourceInfo::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_stored_big_endian"), &ResourceInfo::get_stored_big_endian);
 	ClassDB::bind_method(D_METHOD("get_is_compressed"), &ResourceInfo::get_is_compressed);
 	ClassDB::bind_method(D_METHOD("get_extra"), &ResourceInfo::get_extra);
+
+	BIND_ENUM_CONSTANT(FAKE_LOAD);
+	BIND_ENUM_CONSTANT(NON_GLOBAL_LOAD);
+	BIND_ENUM_CONSTANT(GLTF_LOAD);
+	BIND_ENUM_CONSTANT(REAL_LOAD);
+
+	BIND_ENUM_CONSTANT(MAIN_RESOURCE);
+	BIND_ENUM_CONSTANT(INTERNAL_RESOURCE);
+	BIND_ENUM_CONSTANT(UNLOADED_EXTERNAL_RESOURCE);
 }

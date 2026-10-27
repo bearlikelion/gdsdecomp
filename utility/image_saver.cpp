@@ -48,7 +48,9 @@ bool is_supported_format_for_exr(Image::Format p_format) {
 	}
 }
 
-Error ImageSaver::save_image(const String &dest_path, const Ref<Image> &img, bool lossy, float quality, bool duplicate) {
+Error ImageSaver::save_image(const String &dest_path, const Ref<Image> &p_img, bool lossy, float quality, bool duplicate) {
+	ERR_FAIL_COND_V_MSG(p_img.is_null(), ERR_FILE_CORRUPT, "Image is null for texture " + dest_path);
+	Ref<Image> img = duplicate ? (Ref<Image>)p_img->duplicate() : p_img;
 	ERR_FAIL_COND_V_MSG(img->is_empty(), ERR_FILE_EOF, "Image data is empty for texture " + dest_path + ", not saving");
 	Error err = gdre::ensure_dir(dest_path.get_base_dir());
 	ERR_FAIL_COND_V_MSG(err != OK, err, "Failed to create dirs for " + dest_path);
@@ -64,9 +66,9 @@ Error ImageSaver::save_image(const String &dest_path, const Ref<Image> &img, boo
 	} else if (dest_ext == "png") {
 		err = img->save_png(dest_path);
 	} else if (dest_ext == "tga") {
-		err = ImageSaver::save_image_as_tga(dest_path, img, duplicate);
+		err = ImageSaver::save_image_as_tga(dest_path, img, false);
 	} else if (dest_ext == "svg") {
-		err = ImageSaver::save_image_as_svg(dest_path, img, duplicate);
+		err = ImageSaver::save_image_as_svg(dest_path, img, false);
 	} else if (dest_ext == "dds") {
 		err = img->save_dds(dest_path);
 	} else if (dest_ext == "exr") {
@@ -82,11 +84,11 @@ Error ImageSaver::save_image(const String &dest_path, const Ref<Image> &img, boo
 		}
 		err = img->save_exr(dest_path);
 	} else if (dest_ext == "bmp") {
-		err = ImageSaver::save_image_as_bmp(dest_path, img, duplicate);
+		err = ImageSaver::save_image_as_bmp(dest_path, img, false);
 	} else if (dest_ext == "gif") {
-		err = ImageSaver::save_image_as_gif(dest_path, img, duplicate);
+		err = ImageSaver::save_image_as_gif(dest_path, img, false);
 	} else if (dest_ext == "hdr") {
-		err = ImageSaver::save_image_as_hdr(dest_path, img, duplicate);
+		err = ImageSaver::save_image_as_hdr(dest_path, img, false);
 	} else {
 		ERR_FAIL_V_MSG(ERR_FILE_BAD_PATH, "Invalid file name: " + dest_path);
 	}
@@ -409,7 +411,7 @@ Error ImageSaver::save_images_as_animated_gif(const String &p_path, const Vector
 	double start_time = 0;
 
 	for (int i = 0; i < p_images.size(); i++) {
-		Ref<Image> frame_image = p_images[i];
+		Ref<Image> frame_image = duplicate ? (Ref<Image>)p_images[i]->duplicate() : p_images[i];
 		GDRE_ERR_DECOMPRESS_OR_FAIL(frame_image);
 		// Convert to RGBA8 if needed
 		if (frame_image->get_format() != Image::FORMAT_RGBA8) {
@@ -609,10 +611,34 @@ Error ImageSaver::_save_image(const String &p_path, const Ref<Image> &p_image, b
 	return save_image(p_path, p_image, p_lossy, p_quality, true);
 }
 
+int64_t ImageSaver::get_image_data_size(int p_width, int p_height, Image::Format p_format, bool p_mipmaps) {
+	return Image::get_image_data_size(p_width, p_height, p_format, p_mipmaps);
+}
+
+Image::CompressMode ImageSaver::get_compress_mode_from_format(Image::Format format) {
+	if (!Image::is_format_compressed(format)) {
+		return Image::CompressMode::COMPRESS_MAX;
+	}
+	if (((format >= Image::FORMAT_DXT1 && format <= Image::FORMAT_RGTC_RG) || (format == Image::FORMAT_DXT5_RA_AS_RG))) {
+		return Image::CompressMode::COMPRESS_S3TC;
+	} else if (format >= Image::FORMAT_BPTC_RGBA && format <= Image::FORMAT_BPTC_RGBFU) {
+		return Image::CompressMode::COMPRESS_BPTC;
+	} else if (format == Image::FORMAT_ETC) {
+		return Image::CompressMode::COMPRESS_ETC;
+	} else if (format >= Image::FORMAT_ETC2_R11 && format <= Image::FORMAT_ETC2_RA_AS_RG) {
+		return Image::CompressMode::COMPRESS_ETC2;
+	} else if (format >= Image::FORMAT_ASTC_4x4 && format <= Image::FORMAT_ASTC_8x8_HDR) {
+		return Image::CompressMode::COMPRESS_ASTC;
+	}
+	return Image::CompressMode::COMPRESS_MAX;
+}
+
 void ImageSaver::_bind_methods() {
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("decompress_image", "image"), &ImageSaver::decompress_image);
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("save_image", "dest_path", "image", "lossy", "quality"), &ImageSaver::_save_image, DEFVAL(false), DEFVAL(1.0));
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("save_images_as_animated_gif", "dest_path", "images", "frame_durations_s", "quality"), &ImageSaver::_save_images_as_animated_gif, DEFVAL(100));
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_supported_extensions"), &ImageSaver::get_supported_extensions);
 	ClassDB::bind_static_method(get_class_static(), D_METHOD("is_supported_extension", "ext"), &ImageSaver::is_supported_extension);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_image_data_size", "width", "height", "format", "mipmaps"), &ImageSaver::get_image_data_size);
+	ClassDB::bind_static_method(get_class_static(), D_METHOD("get_compress_mode_from_format", "format"), &ImageSaver::get_compress_mode_from_format);
 }

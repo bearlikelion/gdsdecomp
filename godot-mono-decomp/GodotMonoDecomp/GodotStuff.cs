@@ -7,6 +7,7 @@ using ICSharpCode.Decompiler.CSharp.Transforms;
 using ICSharpCode.Decompiler.Metadata;
 using ICSharpCode.Decompiler.Semantics;
 using ICSharpCode.Decompiler.TypeSystem;
+using ICSharpCode.Decompiler.Util;
 
 namespace GodotMonoDecomp;
 
@@ -50,7 +51,7 @@ public class GetFieldInitializerValueVisitor : DepthFirstAstVisitor
 		if (targetMember is IProperty property && Equals(propertyDeclaration.GetSymbol(), property))
 		{
 			var initializer = propertyDeclaration.Initializer;
-			if (!(initializer == null || initializer == Expression.Null))
+			if (initializer != null)
 			{
 				strVal = GetInitializerValue(initializer);
 			}
@@ -73,7 +74,7 @@ public class GetFieldInitializerValueVisitor : DepthFirstAstVisitor
 	public string? GetInitializerValue(Expression initializer)
 	{
 		string? value = null;
-		if (initializer == null || initializer == Expression.Null)
+		if (initializer == null)
 		{
 			return null;
 		}
@@ -108,7 +109,7 @@ public class GetFieldInitializerValueVisitor : DepthFirstAstVisitor
 			}
 			else if (init is ObjectCreateExpression oce)
 			{
-				if (oce.Children.Count() == 1  && oce.LastChild is SimpleType simpleType)
+				if (oce.Children.Count == 1 && oce.LastChild is SimpleType simpleType && simpleType.IdentifierToken is not null)
 				{
 					if (simpleType.IdentifierToken.Name == "Array")
 					{
@@ -165,6 +166,10 @@ public class GetFieldInitializerValueVisitor : DepthFirstAstVisitor
 			var intializers = fieldDeclaration.Variables;
 			foreach (var initializer in intializers)
 			{
+				if (initializer.Initializer is null)
+				{
+					continue;
+				}
 				strVal = GetInitializerValue(initializer.Initializer);
 				if (strVal != null)
 				{
@@ -229,6 +234,10 @@ public class RemoveGodotScriptPathAttribute : IAstTransform
 public static class GodotStuff
 {
 	public const string BACKING_FIELD_PREFIX = "backing_";
+	public const string EMIT_SIGNAL_METHOD_PREFIX = "EmitSignal";
+
+	// While signal delegates are user-defined, Godot source generators require them to have this suffix.
+	public const string SIGNAL_DELEGATE_SUFFIX = "EventHandler";
 
 	public static DotNetCoreDepInfo? GetGodotSharpPackageDep(DotNetCoreDepInfo? depInfo)
 	{
@@ -344,12 +353,12 @@ public static class GodotStuff
 		bool useNestedDirectoriesForNamespaces,
 		ISet<TypeDefinitionHandle>? godotClassHandles = null)
 	{
-		var fileMap = new Dictionary<string, List<TypeDefinitionHandle>>(StringComparer.OrdinalIgnoreCase);
+		Dictionary<string, List<TypeDefinitionHandle>> fileMap = new Dictionary<string, List<TypeDefinitionHandle>>(StringComparer.OrdinalIgnoreCase);
 		godotClassHandles ??= new HashSet<TypeDefinitionHandle>();
 		var canonicalPaths = new HashSet<string>();
 		var canonicalHandles = new HashSet<TypeDefinitionHandle>();
 		var metadata = module.Metadata;
-		Dictionary<string, string>? metadataFQNToFileMap = null;
+		Dictionary<string, string[]>? metadataFQNToFileMap = null;
 		// look at the files in the original project and find a common root for all the files
 		// var allFiles = filesInOriginal.Select(f => Path.GetDirectoryName(f) ?? "").Where(d => !string.IsNullOrEmpty(d) && !d.StartsWith("addons", StringComparison.OrdinalIgnoreCase)).ToHashSet<string>();
 		string? globalCommonRoot = null;//Common.FindCommonRoot(allFiles) ?? null;
@@ -357,14 +366,11 @@ public static class GodotStuff
 		if (scriptMetadata != null)
 		{
 			// create a map of metadata FQN to file path
-			metadataFQNToFileMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+			metadataFQNToFileMap = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
 			foreach (var pair in scriptMetadata)
 			{
 				var fqn = pair.Value.Class.GetFullClassName();
-				if (!metadataFQNToFileMap.ContainsKey(fqn))
-				{
-					metadataFQNToFileMap[fqn] = pair.Key;
-				}
+				metadataFQNToFileMap[fqn] = metadataFQNToFileMap.TryGetValue(fqn, out var files) ? files.Append(pair.Key).ToArray() : [pair.Key];
 			}
 		}
 
@@ -548,10 +554,11 @@ public static class GodotStuff
 				{
 					// check if the type has a metadata FQN in the script metadata
 					var fqn = type.GetFullTypeName(metadata).ToString();
-					if (metadataFQNToFileMap.TryGetValue(fqn, out var filePath))
+					if (metadataFQNToFileMap.TryGetValue(fqn, out var filePaths))
 					{
-						filePath = Common.TrimPrefix(filePath, "res://");
-						addToCanonicalPaths(filePath, h, type);
+						// If more than one file path exists in the metadata for the class name, pick the one that is actually in the original project.
+						var filePath = filePaths.Count() == 1 ? filePaths.First() : filePaths.FirstOrDefault(f => filesInOriginal.Contains(Common.TrimPrefix(f, "res://")), filePaths.First());
+						addToCanonicalPaths(Common.TrimPrefix(filePath, "res://"), h, type);
 						continue;
 					}
 				}
@@ -599,48 +606,144 @@ public static class GodotStuff
 			}
 		}
 
-		string GetPathFromOriginalFiles(string file_path)
+		string StripLeadingSortablePrefix(string fileStem)
 		{
-			// otherwise, try to find it in the original directory files
-			string scriptPath = "";
-			// empty vector of strings
+			int index = 0;
+			while (index < fileStem.Length && char.IsDigit(fileStem[index]))
+			{
+				index++;
+			}
+			if (index > 0 && index < fileStem.Length && fileStem[index] == '_')
+			{
+				return fileStem[(index + 1)..];
+			}
+			return fileStem;
+		}
+
+		bool IsOriginalFileNameVariant(string originalFilePath, string generatedFilePath)
+		{
+			var originalFileName = Path.GetFileName(originalFilePath);
+			var generatedFileName = Path.GetFileName(generatedFilePath);
+			if (!Path.GetExtension(originalFileName).Equals(Path.GetExtension(generatedFileName), StringComparison.OrdinalIgnoreCase))
+			{
+				return false;
+			}
+
+			var originalStem = StripLeadingSortablePrefix(Path.GetFileNameWithoutExtension(originalFileName));
+			var generatedStem = Path.GetFileNameWithoutExtension(generatedFileName);
+			return originalStem.Equals(generatedStem, StringComparison.OrdinalIgnoreCase) ||
+			       originalStem.EndsWith("." + generatedStem, StringComparison.OrdinalIgnoreCase);
+		}
+
+		int GetCommonPathSuffixScore(string originalFilePath, string generatedFilePath)
+		{
+			var originalParts = _NormalizePath(originalFilePath).Split('/', StringSplitOptions.RemoveEmptyEntries);
+			var generatedParts = _NormalizePath(generatedFilePath).Split('/', StringSplitOptions.RemoveEmptyEntries);
+			int score = 0;
+			int originalIndex = originalParts.Length - 1;
+			int generatedIndex = generatedParts.Length - 1;
+			while (originalIndex >= 0 && generatedIndex >= 0 && originalParts[originalIndex].Equals(generatedParts[generatedIndex], StringComparison.OrdinalIgnoreCase))
+			{
+				score++;
+				originalIndex--;
+				generatedIndex--;
+			}
+			return score;
+		}
+
+		string PickUniqueOriginalPath(List<string> possibles, string file_path)
+		{
+			if (possibles.Count == 0)
+			{
+				return "";
+			}
+			if (possibles.Count == 1)
+			{
+				return possibles[0];
+			}
+
+			var exactPathMatches = possibles.Where(f => f.EndsWith(file_path, StringComparison.OrdinalIgnoreCase)).ToList();
+			if (exactPathMatches.Count == 1)
+			{
+				return exactPathMatches[0];
+			}
+			if (exactPathMatches.Count > 1)
+			{
+				possibles = exactPathMatches;
+			}
+
+			var fileDir = _NormalizePath(Path.GetDirectoryName(file_path) ?? "");
+			var sameDirMatches = possibles.Where(f => _NormalizePath(Path.GetDirectoryName(f) ?? "").Equals(fileDir, StringComparison.OrdinalIgnoreCase)).ToList();
+			if (sameDirMatches.Count == 1)
+			{
+				return sameDirMatches[0];
+			}
+			if (sameDirMatches.Count > 1)
+			{
+				possibles = sameDirMatches;
+			}
+
+			var suffixMatches = possibles
+				.Select(f => new { Path = f, Score = GetCommonPathSuffixScore(f, file_path) })
+				.Where(match => match.Score > 1)
+				.OrderByDescending(match => match.Score)
+				.ToList();
+			if (suffixMatches.Count > 0 && suffixMatches.Count(match => match.Score == suffixMatches[0].Score) == 1)
+			{
+				return suffixMatches[0].Path;
+			}
+
+			return possibles.Count > 1 ? "<multiple>" : "";
+		}
+
+		List<string> GetOriginalPathCandidates(string file_path)
+		{
+			var fileName = Path.GetFileName(file_path);
 			var possibles = filesInOriginal.Where(f =>
-					Path.GetFileName(f) == Path.GetFileName(file_path)
+					Path.GetFileName(f).Equals(fileName, StringComparison.Ordinal)
 					&& !IsInExcludedSubdir(f)
 				)
 				.ToList();
-
-			if (possibles.Count == 0)
+			if (possibles.Count > 0)
 			{
-				possibles = filesInOriginal.Where(f =>
-					Path.GetFileName(f).ToLower() == Path.GetFileName(file_path).ToLower()
-					&& !IsInExcludedSubdir(f)
-				).ToList();
+				return possibles;
 			}
 
-			if (possibles.Count == 1)
+			possibles = filesInOriginal.Where(f =>
+				Path.GetFileName(f).Equals(fileName, StringComparison.OrdinalIgnoreCase)
+				&& !IsInExcludedSubdir(f)
+			).ToList();
+			if (possibles.Count > 0)
 			{
-				scriptPath = possibles[0];
+				return possibles;
 			}
-			else if (possibles.Count > 1)
+
+			return filesInOriginal.Where(f =>
+				IsOriginalFileNameVariant(f, file_path)
+				&& !IsInExcludedSubdir(f)
+			).ToList();
+		}
+
+		string PickUniqueNamespaceDirectoryCandidate(List<string> possibles, HashSet<string> directories)
+		{
+			if (possibles.Count <= 1 || directories.Count == 0)
 			{
-				possibles = possibles.Where(f => f.EndsWith(file_path, StringComparison.OrdinalIgnoreCase)).ToList();
-				if (possibles.Count == 1)
-				{
-					scriptPath = possibles[0];
-				}
+				return "";
 			}
-			if (string.IsNullOrEmpty(scriptPath) && possibles.Count > 1){
-				return "<multiple>";
-			}
-			return scriptPath;
+			var normalizedDirectories = new HashSet<string>(directories.Select(_NormalizePath), StringComparer.OrdinalIgnoreCase);
+			var namespaceDirMatches = possibles.Where(f => normalizedDirectories.Contains(_NormalizePath(Path.GetDirectoryName(f) ?? ""))).ToList();
+			return namespaceDirMatches.Count == 1 ? namespaceDirMatches[0] : "";
+		}
+
+		string GetPathFromOriginalFiles(string file_path)
+		{
+			return PickUniqueOriginalPath(GetOriginalPathCandidates(file_path), file_path);
 		}
 
 		var potentialMap = new Dictionary<string, List<TypeDefinitionHandle>>();
 
 
 		var processAgainAgain = new HashSet<TypeDefinitionHandle>();
-		var dupes = new HashSet<TypeDefinitionHandle>();
 
 		foreach (var h in processAgain)
 		{
@@ -654,14 +757,7 @@ public static class GodotStuff
 				}
 				potentialMap[real_path].Add(h);
 			} else {
-				if (real_path == "<multiple>" && !dupes.Contains(h))
-				{
-					dupes.Add(h);
-				}
-				else
-				{
-					processAgainAgain.Add(h);
-				}
+				processAgainAgain.Add(h);
 			}
 		}
 
@@ -699,10 +795,11 @@ public static class GodotStuff
 			var type = metadata.GetTypeDefinition(h);
 			var ns = metadata.GetString(type.Namespace);
 			var auto_path = GetAutoFileNameForHandle(h);
+			var originalPathCandidates = GetOriginalPathCandidates(auto_path);
 			string? p = null;
 			var namespaceParts = ns.Split('.');
 			var parentNamespace = ns.Contains('.') ? string.Join('.', namespaceParts.Take(namespaceParts.Length - 1)) : "";
-			if (ns != "" && ns != null)
+			if (!string.IsNullOrEmpty(ns))
 			{
 				// pop off the first part of the path, if necessary
 				var fileStem = Common.RemoveNamespacePartOfPath(auto_path, ns);
@@ -711,8 +808,13 @@ public static class GodotStuff
 					fileStem = Path.GetFileName(auto_path);
 				}
 				var directories = GetNamespaceDirectories(ns).Where(d => !string.IsNullOrEmpty(d) && !IsInExcludedSubdir(d)).ToHashSet();
+				var namespaceCandidate = PickUniqueNamespaceDirectoryCandidate(originalPathCandidates, directories);
+				if (!string.IsNullOrEmpty(namespaceCandidate))
+				{
+					p = namespaceCandidate;
+				}
 
-				if (directories.Count == 1)
+				if (string.IsNullOrEmpty(p) && directories.Count == 1)
 				{
 					p = _PathCombine(directories.First(), fileStem);
 				}
@@ -727,9 +829,14 @@ public static class GodotStuff
 					}
 					if (!string.IsNullOrEmpty(parentNamespace)){
 						var parentDirectories = GetNamespaceDirectories(parentNamespace).Where(d => !string.IsNullOrEmpty(d) && !IsInExcludedSubdir(d)).ToHashSet();
+						namespaceCandidate = PickUniqueNamespaceDirectoryCandidate(originalPathCandidates, parentDirectories);
 						var child = string.Join('/', namespaceParts.TakeLast(i));
 						fileStem = _PathCombine(child, Path.GetFileName(auto_path));
-						if (parentDirectories.Count == 1)
+						if (!string.IsNullOrEmpty(namespaceCandidate))
+						{
+							p = namespaceCandidate;
+						}
+						else if (parentDirectories.Count == 1)
 						{
 							p = _PathCombine(parentDirectories.First(), fileStem);
 						}
@@ -756,23 +863,6 @@ public static class GodotStuff
 			}
 			p = _NormalizePath(p);
 			PlaceHandleAtPath(p, h);
-		}
-
-		foreach (var h in dupes)
-		{
-			var auto_path = GetAutoFileNameForHandle(h);
-			var scriptPath = GetPathFromOriginalFiles(auto_path);
-
-			if (scriptPath == "" || scriptPath == "<multiple>")
-			{
-				scriptPath = auto_path;
-			}
-			scriptPath = _NormalizePath(scriptPath);
-			if (IsInExcludedSubdir(scriptPath))
-			{
-				scriptPath = _PathCombine(default_dir, scriptPath);
-			}
-			PlaceHandleAtPath(scriptPath, h);
 		}
 		var caselessDict = new Dictionary<string, List<TypeDefinitionHandle>>(StringComparer.OrdinalIgnoreCase);
 		foreach (var pair in fileMap)
@@ -905,23 +995,10 @@ public static class GodotStuff
 
 	public static bool IsSignalDelegate(IEntity entity)
 	{
-		var attributes = entity.GetAttributes();
-
-		// check if any of the attributes are "Signal"
-		if (attributes.Any(a => a.AttributeType.FullName == "Godot.SignalAttribute"))
-		{
-			return true;
-		}
-
-		if (attributes.Any(a => a.AttributeType.Name == "SignalAttribute"))
-		{
-			return true;
-		}
-
-		return false;
+		return entity.GetAttributes().Any(a => a.AttributeType.FullName == "Godot.SignalAttribute");
 	}
 
-	public static IEnumerable<IType> GetSignalsInClass(ITypeDefinition entity)
+	public static IEnumerable<IType> GetSignalDelegatesInClass(ITypeDefinition entity)
 	{
 		return entity.NestedTypes.Where(IsSignalDelegate);
 	}
@@ -931,7 +1008,7 @@ public static class GodotStuff
 		if (entity is IField field)
 		{
 			return field.Name.StartsWith(BACKING_FIELD_PREFIX) && field.DeclaringTypeDefinition != null &&
-			       GetSignalsInClass(field.DeclaringTypeDefinition).Contains(field.Type.GetDefinition());
+			       GetSignalDelegatesInClass(field.DeclaringTypeDefinition).Contains(field.Type.GetDefinition());
 		}
 
 		return false;
@@ -1057,13 +1134,17 @@ public static class GodotStuff
 					return true;
 				}
 
-				// TODO: fix this to check if the method ends with a signal name
 				// if the method name is EmitSignal<SignalName> and it's a protected or private void method, then it's an auto-generated signal emitter
 				if (
-					method is { IsVirtual: false, Accessibility: Accessibility.Internal or Accessibility.Protected or Accessibility.ProtectedOrInternal or Accessibility.ProtectedAndInternal or Accessibility.Private } &&
-					method.Name.StartsWith("EmitSignal") && method.ReturnType.FullName == "System.Void")
+					method is { IsVirtual: false, Accessibility: not (Accessibility.Public or Accessibility.None) } &&
+					method.Name.StartsWith(EMIT_SIGNAL_METHOD_PREFIX) && method.ReturnType.FullName == "System.Void" && method.DeclaringTypeDefinition != null)
 				{
-					return true;
+					var strippedName = method.Name.Substring(EMIT_SIGNAL_METHOD_PREFIX.Length);
+					if (GetSignalDelegatesInClass(method.DeclaringTypeDefinition).Any(d => d.Name == strippedName + SIGNAL_DELEGATE_SUFFIX))
+					{
+						return true;
+					}
+					return false;
 				}
 
 				// auto-generated getter methods for properties of parent classes
@@ -1071,7 +1152,7 @@ public static class GodotStuff
 
 				break;
 			case IEvent @event:
-				if (@event.DeclaringTypeDefinition != null && GetSignalsInClass(@event.DeclaringTypeDefinition).Contains(@event.ReturnType.GetDefinition()) &&
+				if (@event.DeclaringTypeDefinition != null && GetSignalDelegatesInClass(@event.DeclaringTypeDefinition).Contains(@event.ReturnType.GetDefinition()) &&
 				    GetBackingSignalDelegateFieldNames(@event.DeclaringTypeDefinition)
 					    .Contains(BACKING_FIELD_PREFIX + @event.Name))
 				{

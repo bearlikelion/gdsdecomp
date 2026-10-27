@@ -6,12 +6,14 @@
 #include "core/io/resource_loader.h"
 #include "utility/common.h"
 #include "utility/gdre_settings.h"
+#include "utility/image_saver.h"
+#include "utility/macros.h"
 #include "utility/resource_info.h"
 
 #include "core/error/error_list.h"
 #include "core/error/error_macros.h"
 #include "core/io/file_access.h"
-#include "core/io/image_loader.h"
+#include "core/io/image_resource_format.h"
 #include "core/io/missing_resource.h"
 #include "core/variant/dictionary.h"
 #include "scene/resources/compressed_texture.h"
@@ -103,7 +105,14 @@ TextureLoaderCompat::TextureVersionType TextureLoaderCompat::recognize(const Str
 	const String res_path = p_path;
 	Ref<FileAccess> f = FileAccess::open(res_path, FileAccess::READ, r_err);
 
-	ERR_FAIL_COND_V_MSG(*r_err != OK || f.is_null(), FORMAT_NOT_TEXTURE, "Can't open texture file " + p_path);
+	if (*r_err != OK || f.is_null()) {
+		// fail silently if the file doesn't exist
+		if (!FileAccess::exists(res_path)) {
+			*r_err = ERR_FILE_NOT_FOUND;
+			return FORMAT_NOT_TEXTURE;
+		}
+		ERR_FAIL_COND_V_MSG(*r_err != OK || f.is_null(), FORMAT_NOT_TEXTURE, "Can't open texture file " + p_path);
+	}
 
 	uint8_t header[4];
 	uint64_t got = f->get_buffer(header, 4);
@@ -452,7 +461,7 @@ public:
 };
 CHECK_SIZE_MATCH_NO_PADDING(faketex2D, CompressedTexture2D);
 
-Error TextureLoaderCompat::_load_data_stex2d_v3(const String &p_path, int &tw, int &th, int &tw_custom, int &th_custom, int &flags, Ref<Image> &image, int p_size_limit) {
+Error TextureLoaderCompat::_load_data_stex2d_v3(const String &p_path, int &tw, int &th, int &tw_custom, int &th_custom, uint32_t &flags, uint32_t &df, Ref<Image> &image, int p_size_limit) {
 	Error err;
 	// TODO: make this pass back the flags
 
@@ -468,7 +477,7 @@ Error TextureLoaderCompat::_load_data_stex2d_v3(const String &p_path, int &tw, i
 	th_custom = f->get_16();
 
 	flags = f->get_32(); // texture flags!
-	uint32_t df = f->get_32(); // data format
+	df = f->get_32(); // data format
 	p_size_limit = 0;
 	if (image.is_null()) {
 		image.instantiate();
@@ -486,7 +495,7 @@ Error TextureLoaderCompat::_load_data_stex2d_v3(const String &p_path, int &tw, i
 	return OK;
 }
 
-Error TextureLoaderCompat::_load_data_ctex2d_v4(const String &p_path, int &tw, int &th, Ref<Image> &image, int &r_data_format, int &r_texture_flags, int p_size_limit) {
+Error TextureLoaderCompat::_load_data_ctex2d_v4(const String &p_path, int &tw, int &th, Ref<Image> &image, uint32_t &r_texture_flags, uint32_t &r_data_format, int p_size_limit) {
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	uint8_t header[4];
 	// already checked header
@@ -523,7 +532,7 @@ Error TextureLoaderCompat::_load_data_ctex2d_v4(const String &p_path, int &tw, i
 	return OK;
 }
 
-Error TextureLoaderCompat::_load_layered_texture_v3(const String &p_path, Vector<Ref<Image>> &r_data, Image::Format &r_format, int &r_width, int &r_height, int &r_depth, bool &r_mipmaps) {
+Error TextureLoaderCompat::_load_layered_texture_v3(const String &p_path, Vector<Ref<Image>> &r_data, Image::Format &r_format, int &r_width, int &r_height, int &r_depth, bool &r_mipmaps, uint32_t &flags, uint32_t &r_data_format) {
 	Error err;
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ, &err);
 	ERR_FAIL_COND_V_MSG(f.is_null(), err, "Cannot open file '" + p_path + "'.");
@@ -535,10 +544,11 @@ Error TextureLoaderCompat::_load_layered_texture_v3(const String &p_path, Vector
 	r_width = f->get_32();
 	r_height = f->get_32();
 	r_depth = f->get_32();
-	int flags = f->get_32(); //texture flags!
+	flags = f->get_32(); //texture flags!
 	r_mipmaps = (flags & 1); // Texture::FLAG_MIPMAPS
 
-	Image::Format format = ImageEnumCompat::convert_image_format_enum_v3_to_v4(V3Image::Format(f->get_32()));
+	r_data_format = f->get_32(); // data format
+	Image::Format format = ImageEnumCompat::convert_image_format_enum_v3_to_v4(V3Image::Format(r_data_format));
 	ERR_FAIL_COND_V_MSG(format == Image::FORMAT_MAX, ERR_FILE_CORRUPT, "Textured layer is in an invalid or deprecated format");
 
 	uint32_t compression = f->get_32(); // 0 - lossless (PNG), 1 - vram, 2 - uncompressed
@@ -618,7 +628,7 @@ Error TextureLoaderCompat::_load_layered_texture_v3(const String &p_path, Vector
 	return OK;
 }
 
-Error TextureLoaderCompat::_load_data_ctexlayered_v4(const String &p_path, Vector<Ref<Image>> &r_data, Image::Format &r_format, int &r_width, int &r_height, int &r_depth, int &r_type, bool &r_mipmaps, int &r_data_format) {
+Error TextureLoaderCompat::_load_data_ctexlayered_v4(const String &p_path, Vector<Ref<Image>> &r_data, Image::Format &r_format, int &r_width, int &r_height, int &r_depth, int &r_type, bool &r_mipmaps, uint32_t &r_flags, uint32_t &r_data_format) {
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_CANT_OPEN, vformat("Unable to open file: %s.", p_path));
 
@@ -635,7 +645,7 @@ Error TextureLoaderCompat::_load_data_ctexlayered_v4(const String &p_path, Vecto
 
 	r_depth = f->get_32(); //depth or layer count (CompressedTextureLayered)
 	r_type = f->get_32(); //type
-	f->get_32(); // Nothing
+	r_flags = f->get_32(); //texture flags
 	f->get_32(); // Nothing
 	int mipmaps = f->get_32();
 	f->get_32(); // ignored
@@ -646,10 +656,7 @@ Error TextureLoaderCompat::_load_data_ctexlayered_v4(const String &p_path, Vecto
 	r_data.clear();
 
 	String ext = p_path.get_extension();
-	bool is_layered = false;
-	if (ext == "ctexarray" || ext == "ccube" || ext == "ccubearray") {
-		is_layered = true;
-	}
+	bool is_layered = r_type != V4_MODE_3D;
 
 	int limit = is_layered ? r_depth : r_depth + mipmaps;
 	for (int i = 0; i < limit; i++) {
@@ -774,6 +781,10 @@ bool ResourceConverterTexture2D::handles_type(const String &p_type, int ver_majo
 Ref<Resource> ResourceConverterTexture2D::convert(const Ref<MissingResource> &res, ResourceInfo::LoadType p_type, int ver_major, Error *r_error) {
 	String name;
 	Ref<Resource> texture;
+	if (const Ref<Resource> img = res->get("image"); img.is_valid()) {
+		ImageTextureConverterCompat converter;
+		return converter.convert(res, p_type, ver_major, r_error);
+	}
 
 	if (p_type == ResourceInfo::LoadType::NON_GLOBAL_LOAD) {
 		return res;
@@ -821,7 +832,7 @@ String ResourceFormatLoaderCompatTexture2D::get_resource_type(const String &p_pa
 	return type;
 }
 
-Ref<CompressedTexture2D> ResourceFormatLoaderCompatTexture2D::_set_tex(const String &p_path, ResourceInfo::LoadType p_type, int tw, int th, int tw_custom, int th_custom, int flags, Ref<Image> image) {
+Ref<CompressedTexture2D> ResourceFormatLoaderCompatTexture2D::_set_tex(const String &p_path, ResourceInfo::LoadType p_type, int tw, int th, int tw_custom, int th_custom, uint32_t flags, Ref<Image> image) {
 	Ref<CompressedTexture2D> texture;
 	Ref<OverrideTexture2D> override_texture;
 	if (p_type != ResourceInfo::LoadType::REAL_LOAD) {
@@ -889,17 +900,17 @@ Ref<Resource> ResourceFormatLoaderCompatTexture2D::custom_load(const String &p_p
 		}
 		return Ref<Resource>();
 	}
-	int lw, lh, lwc, lhc, lflags;
-	int data_format;
-	int texture_flags;
+	int lw, lh, lwc, lhc;
+	uint32_t data_format;
+	uint32_t texture_flags;
 	Ref<Resource> texture;
 	Ref<Image> image;
 	if (t == TextureLoaderCompat::FORMAT_V3_STREAM_TEXTURE2D) {
-		err = TextureLoaderCompat::_load_data_stex2d_v3(p_path, lw, lh, lwc, lhc, lflags, image);
+		err = TextureLoaderCompat::_load_data_stex2d_v3(p_path, lw, lh, lwc, lhc, texture_flags, data_format, image);
 	} else if (t == TextureLoaderCompat::FORMAT_V4_COMPRESSED_TEXTURE2D) {
 		lw = 0;
 		lh = 0;
-		err = TextureLoaderCompat::_load_data_ctex2d_v4(p_path, lwc, lhc, image, data_format, texture_flags);
+		err = TextureLoaderCompat::_load_data_ctex2d_v4(p_path, lwc, lhc, image, texture_flags, data_format);
 		if (image.is_valid()) {
 			if (!lwc) {
 				lw = image->get_width();
@@ -915,7 +926,7 @@ Ref<Resource> ResourceFormatLoaderCompatTexture2D::custom_load(const String &p_p
 		*r_error = err;
 	}
 	ERR_FAIL_COND_V_MSG(err != OK, Ref<Resource>(), "Failed to load texture " + p_path);
-	texture = _set_tex(p_path, p_type, lw, lh, lwc, lhc, lflags, image);
+	texture = _set_tex(p_path, p_type, lw, lh, lwc, lhc, texture_flags, image);
 	set_res_path(texture, p_original_path.is_empty() ? p_path : p_original_path, p_type, p_cache_mode);
 	auto info = TextureLoaderCompat::_get_resource_info(p_original_path.is_empty() ? p_path : p_original_path, t);
 	info->cached_id = p_path;
@@ -944,6 +955,41 @@ String ResourceFormatLoaderCompatTexture3D::get_resource_type(const String &p_pa
 	return type;
 }
 
+void normalize_image_formats(const Vector<Ref<Image>> &images) {
+	ERR_FAIL_COND(images.is_empty());
+	auto safe_format = images[0]->get_format();
+	for (int i = 1; i < images.size(); i++) {
+		Ref<Image> image = images[i];
+		auto format = images[i]->get_format();
+		if (format != safe_format) {
+			if (image->is_compressed()) {
+				auto mode = ImageSaver::get_compress_mode_from_format(safe_format);
+				image->decompress();
+				auto astc_format = (safe_format >= Image::Format::FORMAT_ASTC_8x8) ? Image::ASTC_FORMAT_8x8 : Image::ASTC_FORMAT_4x4;
+				Image::BPTCFormat bptc_format = Image::BPTC_DETECT;
+				if (mode == Image::CompressMode::COMPRESS_BPTC) {
+					switch (safe_format) {
+						case Image::FORMAT_BPTC_RGBF:
+							bptc_format = Image::BPTC_FORCE_SIGNED;
+							break;
+						case Image::FORMAT_BPTC_RGBFU:
+							bptc_format = Image::BPTC_FORCE_UNSIGNED;
+							break;
+						default:
+							bptc_format = Image::BPTC_DETECT;
+							break;
+					}
+				}
+				Error err = image->_compress_from_channels(mode, image->detect_used_channels(Image::COMPRESS_SOURCE_GENERIC), astc_format, bptc_format);
+				ERR_CONTINUE_MSG(err != OK, "Failed to compress image from format " + Image::get_format_name(format) + " to format " + Image::get_format_name(safe_format));
+			} else {
+				image->convert(safe_format);
+				ERR_CONTINUE_MSG(image->get_format() != safe_format, "Failed to convert image from format " + Image::get_format_name(format) + " to format " + Image::get_format_name(safe_format));
+			}
+		}
+	}
+}
+
 Ref<CompressedTexture3D> ResourceFormatLoaderCompatTexture3D::_set_tex(const String &p_path, ResourceInfo::LoadType p_type, int tw, int th, int td, bool mipmaps, const Vector<Ref<Image>> &images) {
 	Ref<CompressedTexture3D> texture;
 	Ref<OverrideTexture3D> override_texture;
@@ -962,6 +1008,9 @@ Ref<CompressedTexture3D> ResourceFormatLoaderCompatTexture3D::_set_tex(const Str
 	fake->path_to_file = p_path;
 	fake->mipmaps = mipmaps;
 	if (p_type == ResourceInfo::LoadType::REAL_LOAD) {
+		// There was a bug in the layer textured importer that caused bptc texture images to be saved as alternatingly signed and unsigned.
+		// We have to force the image formats to be the same before creating the texture, otherwise the RenderingServer will refuse to create it.
+		normalize_image_formats(images);
 		RID texture_rid = RS::get_singleton()->texture_3d_create(texture->get_format(), texture->get_width(), texture->get_height(), texture->get_depth(), texture->has_mipmaps(), images);
 		fake->texture = texture_rid;
 	}
@@ -983,12 +1032,12 @@ Ref<Resource> ResourceFormatLoaderCompatTexture3D::custom_load(const String &p_p
 	Ref<Resource> texture;
 	Vector<Ref<Image>> images;
 	Image::Format fmt;
-	int data_format = 0;
-	int texture_flags = 0;
+	uint32_t data_format = 0;
+	uint32_t texture_flags = 0;
 	if (t == TextureLoaderCompat::FORMAT_V3_STREAM_TEXTURE3D) {
-		err = TextureLoaderCompat::_load_layered_texture_v3(p_path, images, fmt, lw, lh, ld, mipmaps);
+		err = TextureLoaderCompat::_load_layered_texture_v3(p_path, images, fmt, lw, lh, ld, mipmaps, texture_flags, data_format);
 	} else if (t == TextureLoaderCompat::FORMAT_V4_COMPRESSED_TEXTURE3D) {
-		err = TextureLoaderCompat::_load_data_ctexlayered_v4(p_path, images, fmt, lw, lh, ld, ltype, mipmaps, data_format);
+		err = TextureLoaderCompat::_load_data_ctexlayered_v4(p_path, images, fmt, lw, lh, ld, ltype, mipmaps, texture_flags, data_format);
 	} else {
 		err = ERR_INVALID_PARAMETER;
 	}
@@ -1063,6 +1112,8 @@ Ref<CompressedTextureLayered> ResourceFormatLoaderCompatTextureLayered::_set_tex
 	fake->mipmaps = mipmaps;
 	fake->layered_type = TextureLayered::LayeredType(type);
 	if (p_type == ResourceInfo::LoadType::REAL_LOAD) {
+		// We have to force the image formats to be the same before creating the texture, otherwise the RenderingServer will refuse to create it.
+		normalize_image_formats(images);
 		RID texture_rid = RS::get_singleton()->texture_2d_layered_create(images, RSE::TextureLayeredType(type));
 		fake->texture = texture_rid;
 	}
@@ -1080,18 +1131,18 @@ Ref<Resource> ResourceFormatLoaderCompatTextureLayered::custom_load(const String
 		return Ref<Resource>();
 	}
 
-	int data_format;
-	int texture_flags = 0;
+	uint32_t data_format = 0;
+	uint32_t texture_flags = 0;
 	int lw, lh, ld, ltype;
 	bool mipmaps;
 	Ref<Resource> texture;
 	Vector<Ref<Image>> images;
 	Image::Format fmt;
 	if (t == TextureLoaderCompat::FORMAT_V3_STREAM_TEXTUREARRAY) {
-		err = TextureLoaderCompat::_load_layered_texture_v3(p_path, images, fmt, lw, lh, ld, mipmaps);
+		err = TextureLoaderCompat::_load_layered_texture_v3(p_path, images, fmt, lw, lh, ld, mipmaps, texture_flags, data_format);
 		ltype = RSE::TEXTURE_LAYERED_2D_ARRAY;
 	} else if (t == TextureLoaderCompat::FORMAT_V4_COMPRESSED_TEXTURELAYERED) {
-		err = TextureLoaderCompat::_load_data_ctexlayered_v4(p_path, images, fmt, lw, lh, ld, ltype, mipmaps, data_format);
+		err = TextureLoaderCompat::_load_data_ctexlayered_v4(p_path, images, fmt, lw, lh, ld, ltype, mipmaps, texture_flags, data_format);
 	} else {
 		err = ERR_INVALID_PARAMETER;
 	}
@@ -1136,18 +1187,27 @@ Ref<Resource> ImageTextureConverterCompat::convert(const Ref<MissingResource> &r
 		}
 		return img;
 	};
-	ERR_FAIL_COND_V_MSG(type != "ImageTexture", res, "Unsupported type: " + type);
+	ERR_FAIL_COND_V_MSG(type != "ImageTexture" && type != "Texture", res, "Unsupported type: " + type);
 	name = get_resource_name(res, ver_major);
 	image = convert_image(res->get("image"));
-	ERR_FAIL_COND_V_MSG(image.is_null(), res, "Cannot load image from ImageTexture resource '" + name + "'.");
+	if (image.is_null()) {
+		String path = res->get_path();
+		if (path.is_empty()) {
+			path = info->original_path;
+		}
+		WARN_PRINT("ImageTextureConverterCompat: image is null for resource '" + path + "'.");
+	}
 
 	size = res->get("size");
 	flags = res->get("flags");
-	bool mipmaps = flags & 1 || image->has_mipmaps();
+	bool mipmaps = flags & 1;
 
-	image->set_name(name);
-	tw = image->get_width();
-	th = image->get_height();
+	if (!image.is_null()) {
+		mipmaps = mipmaps || image->has_mipmaps();
+		image->set_name(name);
+		tw = image->get_width();
+		th = image->get_height();
+	}
 	if (size.width && tw != size.width) {
 		tw_custom = size.width;
 	}
@@ -1239,17 +1299,17 @@ Ref<ImageTexture> TextureLoaderCompat::create_image_texture(const String &p_path
 		texture.instantiate();
 	}
 	fakeimagetex *fake = reinterpret_cast<fakeimagetex *>(texture.ptr());
-	fake->image_stored = true;
+	fake->image_stored = image.is_valid();
 	fake->w = tw;
 	fake->h = th;
-	fake->format = image->get_format();
+	fake->format = image.is_valid() ? image->get_format() : Image::FORMAT_L8;
 	if (tw_custom || th_custom) {
 		fake->size_override = Size2(tw_custom, th_custom);
 	}
 	fake->mipmaps = mipmaps;
 	bool size_override = tw_custom || th_custom;
 	if (p_type == ResourceInfo::LoadType::REAL_LOAD) {
-		RID texture_rid = RS::get_singleton()->texture_2d_create(image);
+		RID texture_rid = image.is_valid() ? RS::get_singleton()->texture_2d_create(image) : RS::get_singleton()->texture_2d_placeholder_create();
 		fake->texture = texture_rid;
 		if (size_override) {
 			RS::get_singleton()->texture_set_size_override(texture_rid, tw_custom, th_custom);
@@ -1297,7 +1357,9 @@ Ref<Resource> LargeTextureConverterCompat::convert(const Ref<MissingResource> &r
 			image_texture = texture_res;
 		}
 		ERR_FAIL_COND_V_MSG(!image_texture.is_valid(), Ref<Resource>(), "LargeTextureConverterCompat: Failed to convert ImageTexture in array data of LargeTexture " + res->get_path());
-		auto image_size = image_texture->get_image()->get_size();
+		Ref<Image> image = image_texture->get_image();
+		ERR_FAIL_COND_V_MSG(image.is_null(), Ref<Resource>(), "Image is null for texture " + image_texture->get_path());
+		auto image_size = image->get_size();
 		max_piece_size.x = MAX(max_piece_size.x, image_size.x);
 		max_piece_size.y = MAX(max_piece_size.y, image_size.y);
 		pieces.push_back({ offset, image_texture });
@@ -1312,7 +1374,9 @@ Ref<Resource> LargeTextureConverterCompat::convert(const Ref<MissingResource> &r
 	auto pos = Point2(0, 0);
 
 	for (int i = 0; i < pieces.size(); i++) {
+		ERR_FAIL_COND_V_MSG(pieces[i].texture.is_null(), Ref<Resource>(), vformat("Texture is null for piece %d of LargeTexture %s", i, info->original_path));
 		auto image = pieces[i].texture->get_image();
+		ERR_FAIL_COND_V_MSG(image.is_null(), Ref<Resource>(), "Image is null for texture " + pieces[i].texture->get_path());
 		pos = pieces[i].offset;
 		while (pos.x != expected_x || pos.y != expected_y) {
 			Size2i gap_size = max_piece_size;
@@ -1438,9 +1502,17 @@ Ref<Resource> ResourceFormatLoaderImageTextureCompat::custom_load(const String &
 	return image_texture;
 }
 
+// only enable this on ver_major <= 2
+static inline bool is_texture_loader_enabled() {
+	int major = GDRESettings::get_singleton()->get_ver_major();
+	if (major == 0) {
+		return GDRESettings::get_singleton()->get_ver_minor() != 0;
+	}
+	return major <= 2;
+}
+
 void ResourceFormatLoaderImageTextureCompat::get_recognized_extensions(List<String> *p_extensions) const {
-	// only enable this on ver_major <= 2
-	if (GDRESettings::get_singleton()->get_ver_major() > 2 && GDRESettings::get_singleton()->get_ver_major() != 0) {
+	if (!is_texture_loader_enabled()) {
 		return;
 	}
 	p_extensions->push_back("png");
@@ -1450,21 +1522,21 @@ void ResourceFormatLoaderImageTextureCompat::get_recognized_extensions(List<Stri
 }
 
 bool ResourceFormatLoaderImageTextureCompat::handles_type(const String &p_type) const {
-	if (GDRESettings::get_singleton()->get_ver_major() > 2 && GDRESettings::get_singleton()->get_ver_major() != 0) {
+	if (!is_texture_loader_enabled()) {
 		return false;
 	}
 	return p_type == "Texture" || p_type == "ImageTexture";
 }
 
 String ResourceFormatLoaderImageTextureCompat::get_resource_type(const String &p_path) const {
-	if (GDRESettings::get_singleton()->get_ver_major() > 2 && GDRESettings::get_singleton()->get_ver_major() != 0) {
+	if (!is_texture_loader_enabled()) {
 		return String();
 	}
 	return "ImageTexture";
 }
 
 Ref<ResourceInfo> ResourceFormatLoaderImageTextureCompat::get_resource_info(const String &p_path, Error *r_error) const {
-	if (GDRESettings::get_singleton()->get_ver_major() > 2 && GDRESettings::get_singleton()->get_ver_major() != 0) {
+	if (!is_texture_loader_enabled()) {
 		return Ref<ResourceInfo>();
 	}
 	static const Vector<String> supported_extensions = { "png", "webp", "jpg", "jpeg" };
@@ -1479,4 +1551,232 @@ Ref<ResourceInfo> ResourceFormatLoaderImageTextureCompat::get_resource_info(cons
 	info->resource_format = "ImageTexture";
 	info->ver_major = GDRESettings::get_singleton()->get_ver_major();
 	return info;
+}
+
+enum TextureFlags : unsigned int { // unsigned to stop sanitizer complaining about bit operations on ints
+	TEXTURE_FLAG_MIPMAPS = 1, /// Enable automatic mipmap generation - when available
+	TEXTURE_FLAG_REPEAT = 2, /// Repeat texture (Tiling), otherwise Clamping
+	TEXTURE_FLAG_FILTER = 4, /// Create texture with linear (or available) filter
+	TEXTURE_FLAG_ANISOTROPIC_FILTER = 8,
+	TEXTURE_FLAG_CONVERT_TO_LINEAR = 16,
+	TEXTURE_FLAG_MIRRORED_REPEAT = 32, /// Repeat texture, with alternate sections mirrored
+	TEXTURE_FLAG_USED_FOR_STREAMING = 2048,
+	TEXTURE_FLAGS_DEFAULT = TEXTURE_FLAG_REPEAT | TEXTURE_FLAG_MIPMAPS | TEXTURE_FLAG_FILTER
+};
+
+enum CompressMode {
+	COMPRESS_LOSSLESS,
+	COMPRESS_LOSSY,
+	COMPRESS_VIDEO_RAM,
+	COMPRESS_UNCOMPRESSED
+};
+
+Error _save_stex(const Ref<Image> &p_image, const String &p_to_path, int p_compress_mode, float p_lossy_quality, Image::CompressMode p_vram_compression, bool p_mipmaps, int p_texture_flags, bool p_streamable, bool p_detect_3d, bool p_detect_srgb, bool p_force_rgbe, bool p_detect_normal, bool p_force_normal, bool p_force_po2_for_compressed) {
+	Ref<FileAccess> f = FileAccess::open(p_to_path, FileAccess::WRITE);
+	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_CANT_OPEN, "Failed to open file " + p_to_path);
+	f->store_8('G');
+	f->store_8('D');
+	f->store_8('S');
+	f->store_8('T'); //godot streamable texture
+
+	bool resize_to_po2 = false;
+
+	if (p_compress_mode == COMPRESS_VIDEO_RAM && p_force_po2_for_compressed && (p_mipmaps || p_texture_flags & TEXTURE_FLAG_REPEAT)) {
+		resize_to_po2 = true;
+		f->store_16(Math::next_power_of_2((uint32_t)p_image->get_width()));
+		f->store_16(p_image->get_width());
+		f->store_16(Math::next_power_of_2((uint32_t)p_image->get_height()));
+		f->store_16(p_image->get_height());
+	} else {
+		f->store_16(p_image->get_width());
+		f->store_16(0);
+		f->store_16(p_image->get_height());
+		f->store_16(0);
+	}
+	f->store_32(p_texture_flags);
+
+	uint32_t format = 0;
+
+	if (p_streamable) {
+		format |= FORMAT_BIT_STREAM;
+	}
+	if (p_mipmaps) {
+		format |= FORMAT_BIT_HAS_MIPMAPS; //mipmaps bit
+	}
+	if (p_detect_3d) {
+		format |= FORMAT_BIT_DETECT_3D;
+	}
+	if (p_detect_srgb) {
+		format |= FORMAT_BIT_DETECT_SRGB;
+	}
+	if (p_detect_normal) {
+		format |= FORMAT_BIT_DETECT_NORMAL;
+	}
+
+	if ((p_compress_mode == COMPRESS_LOSSLESS || p_compress_mode == COMPRESS_LOSSY) && p_image->get_format() > Image::FORMAT_RGBA8) {
+		p_compress_mode = COMPRESS_UNCOMPRESSED; //these can't go as lossy
+	}
+
+	switch (p_compress_mode) {
+		case COMPRESS_LOSSLESS: {
+			bool lossless_force_png = ProjectSettings::get_singleton()->get("rendering/misc/lossless_compression/force_png") ||
+					!Image::_webp_mem_loader_func; // WebP module disabled.
+			bool use_webp = !lossless_force_png && p_image->get_width() <= 16383 && p_image->get_height() <= 16383; // WebP has a size limit
+			Ref<Image> image = p_image->duplicate();
+			if (p_mipmaps) {
+				image->generate_mipmaps();
+			} else {
+				image->clear_mipmaps();
+			}
+
+			int mmc = image->get_mipmap_count() + 1;
+
+			if (use_webp) {
+				format |= FORMAT_BIT_WEBP;
+			} else {
+				format |= FORMAT_BIT_PNG;
+			}
+			f->store_32(format);
+			f->store_32(mmc);
+
+			for (int i = 0; i < mmc; i++) {
+				if (i > 0) {
+					image->shrink_x2();
+				}
+
+				Vector<uint8_t> data;
+				if (use_webp) {
+					data = Image::webp_lossless_packer(image);
+				} else {
+					data = Image::png_packer(image);
+				}
+				int data_len = data.size();
+				f->store_32(data_len);
+
+				f->store_buffer(data.ptr(), data_len);
+			}
+
+		} break;
+		case COMPRESS_LOSSY: {
+			Ref<Image> image = p_image->duplicate();
+			if (p_mipmaps) {
+				image->generate_mipmaps();
+			} else {
+				image->clear_mipmaps();
+			}
+
+			int mmc = image->get_mipmap_count() + 1;
+
+			format |= FORMAT_BIT_WEBP;
+			f->store_32(format);
+			f->store_32(mmc);
+
+			for (int i = 0; i < mmc; i++) {
+				if (i > 0) {
+					image->shrink_x2();
+				}
+
+				Vector<uint8_t> data = Image::webp_lossy_packer(image, p_lossy_quality);
+				int data_len = data.size();
+				f->store_32(data_len);
+
+				f->store_buffer(data.ptr(), data_len);
+			}
+		} break;
+		case COMPRESS_VIDEO_RAM: {
+			Ref<Image> image = p_image->duplicate();
+			if (resize_to_po2) {
+				image->resize_to_po2();
+			}
+			if (p_mipmaps) {
+				image->generate_mipmaps(p_force_normal);
+			}
+
+			if (p_force_rgbe && image->get_format() >= Image::FORMAT_R8 && image->get_format() <= Image::FORMAT_RGBE9995) {
+				image->convert(Image::FORMAT_RGBE9995);
+			} else {
+				Image::CompressSource csource = Image::COMPRESS_SOURCE_GENERIC;
+				if (p_force_normal) {
+					csource = Image::COMPRESS_SOURCE_NORMAL;
+				} else if (p_texture_flags & TEXTURE_FLAG_CONVERT_TO_LINEAR) {
+					csource = Image::COMPRESS_SOURCE_SRGB;
+				}
+
+				image->compress(p_vram_compression, csource /*, p_lossy_quality*/);
+			}
+
+			format |= ImageEnumCompat::convert_image_format_enum_v4_to_v3(image->get_format());
+
+			f->store_32(format);
+
+			Vector<uint8_t> data = image->get_data();
+			int dl = data.size();
+			f->store_buffer(data.ptr(), dl);
+		} break;
+		case COMPRESS_UNCOMPRESSED: {
+			Ref<Image> image = p_image->duplicate();
+			if (p_mipmaps) {
+				image->generate_mipmaps();
+			} else {
+				image->clear_mipmaps();
+			}
+
+			format |= image->get_format();
+			f->store_32(format);
+
+			Vector<uint8_t> data = image->get_data();
+			int dl = data.size();
+
+			f->store_buffer(data.ptr(), dl);
+
+		} break;
+	}
+	return OK;
+}
+
+Error TextureLoaderCompat::save_image_to_stex_v3(const Ref<Image> &p_image, const String &p_to_path, int p_compress_mode, Image::CompressMode p_vram_compression, uint32_t p_texture_flags, uint32_t p_data_format, bool force_rgbe, bool force_normal) {
+	if (p_compress_mode == COMPRESS_VIDEO_RAM) {
+		switch (p_vram_compression) {
+			case Image::CompressMode::COMPRESS_S3TC:
+			case Image::CompressMode::COMPRESS_ETC:
+			case Image::CompressMode::COMPRESS_ETC2: {
+			} break;
+			default: { // v3 didn't support other compress modes
+				return ERR_INVALID_PARAMETER;
+			} break;
+		}
+	}
+	float p_lossy_quality = 1.0;
+	// int compress_mode = p_options["compress/mode"];
+	// float lossy = p_options["compress/lossy_quality"];
+	// int repeat = p_options["flags/repeat"];
+	// bool filter = p_options["flags/filter"];
+	// bool mipmaps = p_options["flags/mipmaps"];
+	// bool anisotropic = p_options["flags/anisotropic"];
+	// int srgb = p_options["flags/srgb"];
+	// bool fix_alpha_border = p_options["process/fix_alpha_border"];
+	// bool premult_alpha = p_options["process/premult_alpha"];
+	// bool invert_color = p_options["process/invert_color"];
+	// bool normal_map_invert_y = p_options["process/normal_map_invert_y"];
+	// bool stream = p_options["stream"];
+	// int size_limit = p_options["size_limit"];
+	// bool hdr_as_srgb = p_options["process/HDR_as_SRGB"];
+	// float scale = p_options["svg/scale"];
+	// force normal is normal == 1
+	// int normal = p_options["compress/normal_map"];
+	// bool force_rgbe = p_options["compress/hdr_mode"];
+	// int bptc_ldr = p_options["compress/bptc_ldr"];
+
+	bool p_mipmaps = p_texture_flags & TEXTURE_FLAG_MIPMAPS;
+	bool p_streamable = p_data_format & FORMAT_BIT_STREAM;
+	bool p_detect_3d = p_data_format & FORMAT_BIT_DETECT_3D;
+	bool p_detect_srgb = p_data_format & FORMAT_BIT_DETECT_SRGB;
+	bool p_detect_normal = p_data_format & FORMAT_BIT_DETECT_NORMAL;
+	bool p_force_normal = force_normal;
+	bool p_force_po2_for_compressed = p_compress_mode == COMPRESS_VIDEO_RAM && p_vram_compression != Image::CompressMode::COMPRESS_S3TC;
+
+	if (p_image->is_compressed()) {
+		p_image->decompress();
+	}
+	return _save_stex(p_image, p_to_path, p_compress_mode, p_lossy_quality, p_vram_compression, p_mipmaps, p_texture_flags, p_streamable, p_detect_3d, p_detect_srgb, force_rgbe, p_detect_normal, p_force_normal, p_force_po2_for_compressed);
 }
